@@ -1,0 +1,322 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* ============================================
+     BACKGROUND LAYERS
+     ============================================ */
+  --bg-base: #111418;
+  --bg-surface: #1C2127;
+  --bg-surface-hover: #2F343C;
+  --bg-hero: #111418;
+  --bg-sidebar: #1C2127;
+  --bg-border: #383E47;
+  --bg-subtle: #2F343C;
+
+  /* Legacy aliases — keep for Tailwind config compat */
+  --bg-elevated: var(--bg-surface-hover);
+  --bg-overlay: var(--bg-surface-hover);
+  --bg-inset: #0E1114;
+  --background: var(--bg-base);
+  --foreground: var(--text-primary);
+
+  /* ============================================
+     TEXT COLORS
+     ============================================ */
+  --text-primary: #F6F7F9;
+  --text-secondary: #ABB3BF;
+  --text-muted: #738091;
+  --text-tertiary: #738091;
+  --text-disabled: #4B5060;
+
+  /* ============================================
+     SEMANTIC / INTENT COLORS
+     ============================================ */
+  --intent-primary: #2D72D2;
+  --intent-success: #32A467;
+  --intent-warning: #EC9A3C;
+  --intent-danger: #E76A6E;
+
+  /* Aliases for existing Tailwind class compat */
+  --accent-primary: var(--intent-primary);
+  --accent-primary-hover: rgba(45, 114, 210, 0.08);
+  --accent-primary-muted: rgba(45, 114, 210, 0.12);
+  --accent-primary-text: #4C90F0;
+  --bullish: var(--intent-success);
+  --bullish-bg: rgba(50, 164, 103, 0.10);
+  --bearish: var(--intent-danger);
+  --bearish-bg: rgba(231, 106, 110, 0.10);
+  --alert: var(--intent-warning);
+  --alert-bg: rgba(236, 154, 60, 0.10);
+  --critical: var(--intent-danger);
+  --critical-bg: rgba(231, 106, 110, 0.10);
+
+  /* ============================================
+     VELOCITY SEMANTIC COLORS (direction-based)
+     ============================================ */
+  --vel-accelerating: #EC9A3C;
+  --vel-accelerating-bg: rgba(236, 154, 60, 0.12);
+  --vel-stable: #8A9BAE;
+  --vel-stable-bg: rgba(138, 155, 174, 0.10);
+  --vel-decelerating: #5E7A8A;
+  --vel-decelerating-bg: rgba(94, 122, 138, 0.10);
+
+  /* ============================================
+     NARRATIVE LIFECYCLE STAGES
+     ============================================ */
+  --stage-emerging: #4C90F0;
+  --stage-emerging-bg: rgba(76, 144, 240, 0.12);
+  --stage-growing: #32A467;
+  --stage-growing-bg: rgba(50, 164, 103, 0.12);
+  --stage-mature: #EC9A3C;
+  --stage-mature-bg: rgba(236, 154, 60, 0.12);
+  --stage-declining: #E76A6E;
+  --stage-declining-bg: rgba(231, 106, 110, 0.12);
+  --stage-dormant: #738091;
+  --stage-dormant-bg: rgba(115, 128, 145, 0.12);
+
+  /* ============================================
+     CORRELATION / SPECIAL
+     ============================================ */
+  --purple: #A854F7;
+  --purple-muted: rgba(168, 84, 247, 0.12);
+
+  /* ============================================
+     EXTENDED PALETTE (data visualization)
+     ============================================ */
+  --color-cerulean: #147EB3;
+  --color-turquoise: #00A396;
+  --color-vermilion: #D33D17;
+  --color-rose: #DB2C6F;
+  --color-indigo: #7961DB;
+
+  /* Manipulation indicator aliases */
+  --indicator-coordinated: var(--color-indigo);
+  --indicator-astroturfing: var(--color-turquoise);
+  --indicator-botnet: var(--intent-danger);
+  --indicator-sockpuppet: #8E292C;
+  --indicator-temporal: var(--intent-warning);
+  --indicator-concentration: var(--intent-primary);
+
+  /* ============================================
+     BORDERS (alias for Tailwind compat)
+     ============================================ */
+  --border-default: var(--bg-border);
+  --border-subtle: var(--bg-border);
+  --border-strong: var(--bg-subtle);
+
+  /* ============================================
+     TYPOGRAPHY
+     ============================================ */
+  --font-display: var(--font-ibm-plex-sans, "IBM Plex Sans"), -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: var(--font-ibm-plex-sans, "IBM Plex Sans"), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: var(--font-ibm-plex-mono, "IBM Plex Mono"), "Fira Code", Consolas, monospace;
+
+  --text-display: 22px;
+  --text-title: 22px;
+  --text-heading: 13px;
+  --text-body: 13px;
+  --text-small: 13px;
+  --text-micro: 11px;
+  --text-mono-size: 12px;
+
+  /* Data-forward size tokens */
+  --text-hero-number: 28px;
+  --text-large-number: 22px;
+  --text-medium-number: 12px;
+  --text-label: 10px;
+
+  /* ============================================
+     SPACING (4px base unit)
+     ============================================ */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ============================================
+     BORDER RADIUS — 2px everywhere (terminal style)
+     ============================================ */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-badge: 2px;
+
+  /* ============================================
+     TRANSITIONS
+     ============================================ */
+  --transition-fast: 150ms ease;
+  --transition-normal: 200ms ease;
+  --transition-bezier: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 200ms;
+  --duration-slow: 350ms;
+  --duration-enter: 500ms;
+
+  /* ============================================
+     SHADOWS (border contrast, not blur)
+     ============================================ */
+  --shadow-none: none;
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-xl: 0 8px 16px rgba(0, 0, 0, 0.5);
+  --shadow-glow: none;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  font-weight: 400;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(45, 114, 210, 0.3);
+  color: var(--text-primary);
+}
+
+/* Display font for headings — IBM Plex Sans */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* Utility class for display font */
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* Ticker marquee animation */
+@keyframes ticker-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-ticker {
+  animation: ticker-scroll 40s linear infinite;
+}
+
+.animate-ticker:hover {
+  animation-play-state: paused;
+}
+
+/* Glass surface — now solid (no backdrop-filter) */
+.glass {
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-border);
+}
+
+/* Shimmer skeleton */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(90deg, var(--bg-surface-hover) 25%, rgba(255,255,255,0.03) 50%, var(--bg-surface-hover) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Accent pulse for SURGE / accelerating signals */
+@keyframes pulse-accent {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-pulse-accent {
+  animation: pulse-accent 2s ease-in-out infinite;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb { background: var(--bg-border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--bg-subtle); }
+
+/* Links */
+a { color: inherit; text-decoration: none; }
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .font-mono-data {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: var(--text-mono-size);
+    letter-spacing: -0.02em;
+  }
+  /* Data-forward number utilities */
+  .font-data-hero {
+    font-family: var(--font-mono);
+    font-size: var(--text-hero-number);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .font-data-large {
+    font-family: var(--font-mono);
+    font-size: var(--text-large-number);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .font-data-medium {
+    font-family: var(--font-mono);
+    font-size: var(--text-medium-number);
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  /* Topic label (extremely muted) */
+  .label-topic {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-muted);
+    opacity: 0.45;
+    font-weight: 500;
+  }
+  /* Label utilities */
+  .label-micro {
+    font-size: var(--text-label);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .label-small {
+    font-size: var(--text-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+}

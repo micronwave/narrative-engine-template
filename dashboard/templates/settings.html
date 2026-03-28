@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Settings — Narrative Engine{% endblock %}
+{% block content %}
+
+<div class="page-header">
+    <h1 class="page-title">System Configuration</h1>
+    <div class="muted">Read-only view of current configuration. Edit <code>.env</code> to change values.</div>
+</div>
+
+<div class="settings-layout">
+
+    <div class="detail-card">
+        <div class="detail-card-title">Asset Library</div>
+        {% if asset_stats.exists %}
+        <div class="settings-stats-row">
+            <div class="settings-stat">
+                <div class="settings-stat-value accent">{{ asset_stats.count }}</div>
+                <div class="settings-stat-label">Total Assets</div>
+            </div>
+            <div class="settings-stat">
+                <div class="settings-stat-value">{{ asset_stats.tickers }}</div>
+                <div class="settings-stat-label">Tickers</div>
+            </div>
+            <div class="settings-stat">
+                <div class="settings-stat-value">{{ asset_stats.topics }}</div>
+                <div class="settings-stat-label">Topics</div>
+            </div>
+        </div>
+        {% else %}
+        <div class="muted">Asset library not found. Run <code>python build_asset_library.py</code></div>
+        {% endif %}
+    </div>
+
+    <div class="detail-card">
+        <div class="detail-card-title">RSS Feeds <span class="count-badge">{{ feeds|length }}</span></div>
+        <div class="feeds-list">
+            {% for feed in feeds %}
+            <div class="feed-item">
+                <span class="feed-dot ok">●</span>
+                <span class="feed-url">{{ feed }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="detail-card">
+        <div class="detail-card-title">Configuration</div>
+        <div class="config-table">
+            {% for key, value in cfg.items() %}
+            <div class="config-row">
+                <span class="config-key">{{ key }}</span>
+                <span class="config-value">
+                    {% if value is iterable and value is not string %}
+                        {{ value | join(', ') }}
+                    {% else %}
+                        {{ value }}
+                    {% endif %}
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+</div>
+{% endblock %}

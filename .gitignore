@@ -1,0 +1,47 @@
+# Environment — never commit secrets
+.env
+
+# Runtime data (keep .gitkeep)
+data/*
+!data/.gitkeep
+*.db
+*.pkl
+
+# Stray pip artifacts
+=*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Node.js
+node_modules/
+frontend/.next/
+
+# Logs (keep .gitkeep)
+logs/*
+!logs/.gitkeep
+
+# Build journals
+BUILD_LOG.md
+frontend_build_log
+
+# Private planning
+prod_plan/
+
+# Security
+*.secret
+*.pem
