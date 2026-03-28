@@ -266,11 +266,13 @@ def settings_view():
         feeds = []
 
     # Asset library stats
-    asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.pkl"
+    asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.json"
     asset_stats = {"exists": False, "count": 0}
     if asset_lib_path.exists():
         try:
-            lib = safe_pickle_load(asset_lib_path)
+            import json as _json
+            with open(asset_lib_path, "r", encoding="utf-8") as _f:
+                lib = _json.load(_f)
             asset_stats = {
                 "exists": True,
                 "count": len(lib),
@@ -469,10 +471,12 @@ def api_stocks():
         from settings import settings as _settings
 
         # Load tickers from asset library pkl (same pattern as /settings page)
-        asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.pkl"
+        asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.json"
         tickers: list[str] = []
         if asset_lib_path.exists():
-            lib = safe_pickle_load(asset_lib_path)
+            import json as _json
+            with open(asset_lib_path, "r", encoding="utf-8") as _f:
+                lib = _json.load(_f)
             tickers = [k for k in lib if not k.startswith("TOPIC:")]
 
         if not tickers:

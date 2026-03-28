@@ -859,6 +859,8 @@ def run() -> None:
                     "ns_score": max(0.0, current_ns - 0.25),
                 })
 
+        deduplicator.clear_batch()
+
         logger.info("Step 13: adversarial check — %d events", len(adversarial_events))
         step_duration = (time.monotonic() - step_start) * 1000
         _log_step(repository, cycle_id, 13, "adversarial", "OK", step_duration,

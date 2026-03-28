@@ -20,9 +20,13 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
+import logging as _logging
+
 from fastapi import Depends, FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+logger = _logging.getLogger(__name__)
 
 try:
     from sse_starlette.sse import EventSourceResponse
@@ -135,7 +139,7 @@ def _get_jwt_secret() -> str:
     """Return JWT secret or raise 500 if not properly configured."""
     secret = os.environ.get("JWT_SECRET_KEY", "")
     if not secret or len(secret) < 32:
-        raise HTTPException(status_code=500, detail="JWT_SECRET_KEY must be at least 32 characters")
+        raise HTTPException(status_code=500, detail="Server authentication misconfigured")
     return secret
 
 # ===========================================================================
@@ -367,7 +371,12 @@ _subscription: dict = {
     "subscribed": False,
 }
 
-STUB_AUTH_TOKEN = "stub-auth-token"
+import secrets as _secrets
+STUB_AUTH_TOKEN = os.environ.get("STUB_AUTH_TOKEN", "")
+if not STUB_AUTH_TOKEN:
+    STUB_AUTH_TOKEN = _secrets.token_urlsafe(32)
+    print(f"[Auth] Generated stub token: {STUB_AUTH_TOKEN}")
+    print("[Auth] Set STUB_AUTH_TOKEN in .env to persist across restarts")
 
 app = FastAPI(title="Narrative Intelligence API", version="0.2.0")
 
@@ -376,7 +385,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _cors_raw.split(",")],
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-Auth-Token", "Authorization"],
 )
 
 
@@ -401,7 +410,7 @@ async def _init_narrative_asset_ids():
             if na["narrative_id"] in id_map:
                 na["narrative_id"] = id_map[na["narrative_id"]]
     except Exception as e:
-        print(f"[D1] Warning: could not initialize narrative IDs from DB: {e}")
+        logger.warning("Could not initialize narrative IDs from DB: %s", e)
 
 
 _DYNAMIC_SECURITIES: dict[str, dict] = {}
@@ -417,13 +426,12 @@ async def start_price_refresh():
     global _DYNAMIC_SECURITIES
     _DYNAMIC_SECURITIES = _discover_linked_tickers()
     if _DYNAMIC_SECURITIES:
-        print(f"[Startup] Discovered {len(_DYNAMIC_SECURITIES)} dynamic tickers: "
-              f"{list(_DYNAMIC_SECURITIES.keys())[:10]}...")
+        logger.info("Discovered %d dynamic tickers", len(_DYNAMIC_SECURITIES))
 
     if finnhub.is_enabled():
         asyncio.create_task(_price_refresh_loop())
     else:
-        print("[Finnhub] API key not set — price refresh disabled")
+        logger.info("Finnhub API key not set — price refresh disabled")
 
 # Crypto symbol mapping for Finnhub (moved to module level to avoid per-cycle recreation)
 _CRYPTO_MAP = {
@@ -642,9 +650,9 @@ async def _price_refresh_loop():
                             if nq:
                                 _apply_normalized(sec, nq)
                     except Exception as e:
-                        print(f"[DataNormalizer] Fallback refresh error: {e}")
+                        logger.error("DataNormalizer fallback refresh error: %s", e)
         except Exception as e:
-            print(f"[Finnhub] Price refresh error: {e}")
+            logger.error("Price refresh error: %s", e)
         await asyncio.sleep(interval)
 
 
@@ -777,7 +785,7 @@ async def _impact_score_loop():
             for sec in TRACKED_SECURITIES:
                 sec["narrative_impact_score"] = scores.get(sec["id"], 0)
         except Exception as e:
-            print(f"[D3] Impact score refresh error: {e}")
+            logger.error("Impact score refresh error: %s", e)
         await asyncio.sleep(interval)
 
 
@@ -815,7 +823,7 @@ async def start_websocket_relay():
     global _ws_relay
     api_key = os.environ.get("FINNHUB_API_KEY", "")
     if not api_key:
-        print("[WS Relay] API key not set — WebSocket relay disabled")
+        logger.info("WS Relay: API key not set — WebSocket relay disabled")
         return
 
     symbols_limit = int(os.environ.get("WEBSOCKET_SYMBOLS_LIMIT", "50"))
@@ -855,7 +863,7 @@ async def _tick_flush_loop():
                         if count > 0:
                             print(f"[Tick Flush] Wrote {count} ticks to DB")
         except Exception as e:
-            print(f"[Tick Flush] Error: {e}")
+            logger.error("Tick flush error: %s", e)
         await asyncio.sleep(flush_interval)
 
 
@@ -874,12 +882,12 @@ async def _tick_retention_loop():
                 candles = repo.aggregate_candles_1m(cutoff)
                 pruned = repo.prune_old_ticks(cutoff)
                 if candles > 0 or pruned > 0:
-                    print(
-                        f"[Tick Retention] Aggregated {candles} candles, "
-                        f"pruned {pruned} ticks (cutoff: {retention_hours}h)"
+                    logger.info(
+                        "Tick retention: aggregated %d candles, pruned %d ticks (cutoff: %dh)",
+                        candles, pruned, retention_hours,
                     )
         except Exception as e:
-            print(f"[Tick Retention] Error: {e}")
+            logger.error("Tick retention error: %s", e)
         await asyncio.sleep(3600)  # Every hour
 
 
@@ -932,13 +940,12 @@ async def _analytics_bg_loop():
 
             _compute_lead_time_cache(all_narratives, first_dates, price_data)
             _compute_contrarian_cache(repo, all_narratives, price_data)
-            print(
-                f"[Analytics BG] Refreshed — {len(price_data)} tickers, "
-                f"{len(_lead_time_cache)} thresholds, "
-                f"{len(_contrarian_cache.get('signals', []))} contrarian signals"
+            logger.info(
+                "Analytics BG refreshed: %d tickers, %d thresholds, %d contrarian signals",
+                len(price_data), len(_lead_time_cache), len(_contrarian_cache.get("signals", []))
             )
         except Exception as e:
-            print(f"[Analytics BG] Error: {e}")
+            logger.error("Analytics background refresh error: %s", e)
         await asyncio.sleep(interval)
 
 
@@ -3680,7 +3687,7 @@ def get_upcoming_earnings(days: int = 14):
             results = [r for r in results if r.get("days_until") is None or r["days_until"] <= days]
         return results
     except Exception as e:
-        print(f"[Earnings] Failed to fetch earnings calendar: {e}")
+        logger.error("Failed to fetch earnings calendar: %s", e)
         return []
 
 

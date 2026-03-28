@@ -79,8 +79,14 @@ _HEDGE_PATTERNS: list[re.Pattern] = [
     for term in HEDGE_VOCAB
 ]
 
-# Ticker regex: 1-5 uppercase letters at word boundaries.
-_TICKER_RE = re.compile(r"\b[A-Z]{1,5}\b")
+# Ticker regex: 2-5 uppercase letters at word boundaries (1-letter excluded to avoid noise).
+_TICKER_RE = re.compile(r"\b[A-Z]{2,5}\b")
+_TICKER_STOPWORDS = frozenset({
+    "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL", "CAN", "HER",
+    "WAS", "ONE", "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW",
+    "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM", "LET", "SAY",
+    "SHE", "TOO", "USE", "CEO", "CFO", "COO", "USA", "GDP", "IPO", "SEC",
+})
 
 # POSITIVE/NEGATIVE word sets for O(1) lookup.
 _POS_SET = set(POSITIVE_WORDS)
@@ -170,8 +176,7 @@ def compute_entropy(
     entity_counts: Counter = Counter()
 
     for doc in documents:
-        # Ticker symbols (uppercase letter sequences, word boundaries).
-        tickers = _TICKER_RE.findall(doc)
+        tickers = [t for t in _TICKER_RE.findall(doc) if t not in _TICKER_STOPWORDS]
         entity_counts.update(tickers)
 
         # Fiscal/financial vocabulary terms (case-insensitive).

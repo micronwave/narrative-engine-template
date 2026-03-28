@@ -267,6 +267,11 @@ class RssIngester(Ingester):
         ingested_at = datetime.now(timezone.utc).isoformat()
 
         for feed_url in self._feed_urls:
+            parsed_url = urlparse(feed_url)
+            if parsed_url.scheme not in ("http", "https"):
+                logger.warning("Rejecting non-HTTP feed URL: %s", feed_url)
+                continue
+
             if not can_fetch(feed_url, self._repository):
                 logger.info("robots.txt disallows %s — skipping feed", feed_url)
                 continue
@@ -277,7 +282,7 @@ class RssIngester(Ingester):
                     headers={"User-Agent": "NarrativeIntelligenceBot/1.0"},
                 )
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    feed_bytes = resp.read(10 * 1024 * 1024)  # 10 MB cap
+                    feed_bytes = resp.read(10 * 1024 * 1024)
                 parsed = feedparser.parse(feed_bytes)
             except Exception as exc:
                 logger.error("feedparser raised for %s: %s", feed_url, exc)

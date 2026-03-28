@@ -1,5 +1,5 @@
+import json
 import logging
-import pickle
 from pathlib import Path
 
 import faiss
@@ -11,21 +11,9 @@ logger = logging.getLogger(__name__)
 
 
 class AssetMapper:
-    """
-    Maps narratives to financial assets via embedding similarity.
-    Zero LLM calls.
-    """
+    """Maps narratives to financial assets via embedding similarity."""
 
     def __init__(self, asset_library_path: str, embedder: EmbeddingModel) -> None:
-        """
-        Load and validate the asset library.
-
-        Raises FileNotFoundError if the asset library pickle is not found.
-        Raises ValueError if embedding dimension mismatches the pipeline embedder.
-
-        The library is a pickled dict: {ticker: {'name': str, 'embedding': np.ndarray}}
-        A FAISS IndexFlatIP is built in memory from the asset embeddings on init.
-        """
         path = Path(asset_library_path)
         if not path.exists():
             raise FileNotFoundError(
@@ -33,8 +21,8 @@ class AssetMapper:
                 "Run build_asset_library.py first."
             )
 
-        with open(path, "rb") as f:
-            library: dict = pickle.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            library: dict = json.load(f)
 
         pipeline_dim: int = embedder.dimension()
 

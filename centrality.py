@@ -59,7 +59,7 @@ def compute_centrality(graph: nx.Graph) -> dict[str, float]:
     Returns empty dict if fewer than 2 nodes exist.
     If no edges exist, betweenness centrality is 0.0 for all nodes — correct.
 
-    # TODO SCALE: replace betweenness_centrality with approximate harmonic centrality + sampling when active narrative count > 500
+    # TODO SCALE: approximate harmonic centrality + sampling when n > 500
     """
     if graph.number_of_nodes() < 2:
         return {}

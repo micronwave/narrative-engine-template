@@ -739,7 +739,8 @@ class SqliteRepository(Repository):
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS pipeline_run_log (
-                    run_id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
                     step_number INTEGER,
                     step_name TEXT,
                     status TEXT,
@@ -1378,7 +1379,6 @@ class SqliteRepository(Repository):
             return dict(row) if row else None
 
     def update_sonnet_daily_spend(self, date: str, tokens: int, calls: int) -> None:
-        # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
         with self._get_conn() as conn:
             conn.execute(
                 """
@@ -1390,6 +1390,23 @@ class SqliteRepository(Repository):
                 """,
                 (date, tokens, calls),
             )
+
+    def check_and_deduct_sonnet_budget(self, date: str, estimated_tokens: int, budget: int) -> bool:
+        """Atomically check and deduct budget. Returns True if within budget."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO sonnet_daily_spend (date, total_tokens_used, total_calls) VALUES (?, 0, 0)",
+                (date,),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE sonnet_daily_spend
+                SET total_tokens_used = total_tokens_used + ?, total_calls = total_calls + 1
+                WHERE date = ? AND total_tokens_used + ? < ?
+                """,
+                (estimated_tokens, date, estimated_tokens, budget),
+            )
+            return cursor.rowcount > 0
 
     # --- Adversarial Operations ---
 

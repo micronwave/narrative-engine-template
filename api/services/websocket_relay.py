@@ -160,8 +160,7 @@ class FinnhubWebSocketRelay:
 
         # NOTE: Assumes single uvicorn worker. Multi-worker deployment would cause duplicate WebSocket connections.
         url = f"{_FINNHUB_WS_URL}?token={self._api_key}"
-        logger.info("[WS Relay] Connecting to Finnhub WebSocket (token=***%s)",
-                     self._api_key[-4:] if len(self._api_key) > 4 else "****")
+        logger.info("[WS Relay] Connecting to Finnhub WebSocket")
         async with websockets.connect(url, ping_interval=30, ping_timeout=10) as ws:
             self._ws = ws
             self._connected = True

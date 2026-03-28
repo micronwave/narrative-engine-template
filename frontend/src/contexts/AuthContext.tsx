@@ -2,13 +2,12 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 
-const STUB_TOKEN = "stub-auth-token";
 const STORAGE_KEY = "auth_token";
 
 type AuthContextValue = {
   isSignedIn: boolean;
   token: string | null;
-  signIn: () => void;
+  signIn: (token: string) => void;
   signOut: () => void;
 };
 
@@ -22,30 +21,29 @@ export const AuthContext = createContext<AuthContextValue>({
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
 
-  // Read from localStorage on mount (client-only)
   useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored === STUB_TOKEN) setToken(stored);
+      if (stored) setToken(stored);
     } catch {
-      // localStorage unavailable (SSR or privacy mode)
+      /* localStorage unavailable */
     }
   }, []);
 
-  function signIn() {
+  function signIn(authToken: string) {
     try {
-      localStorage.setItem(STORAGE_KEY, STUB_TOKEN);
+      localStorage.setItem(STORAGE_KEY, authToken);
     } catch {
-      // ignore
+      /* ignore */
     }
-    setToken(STUB_TOKEN);
+    setToken(authToken);
   }
 
   function signOut() {
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
-      // ignore
+      /* ignore */
     }
     setToken(null);
   }

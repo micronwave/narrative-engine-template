@@ -106,7 +106,8 @@ class NotificationManager:
                         linked = json.loads(linked)
                     except Exception:
                         linked = []
-                if target_id.upper() in linked:
+                ticker_set = {a.get("ticker", "").upper() for a in linked if isinstance(a, dict)}
+                if target_id.upper() in ticker_set:
                     nid = narrative["narrative_id"]
                     results.append(self._create_notification(
                         rule,

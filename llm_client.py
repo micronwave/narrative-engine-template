@@ -108,7 +108,7 @@ class LlmClient:
     Single interface for all LLM calls.
     No direct anthropic SDK calls outside this file.
 
-    # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
+    # TODO SCALE: Redis INCR for concurrent workers
     """
 
     def __init__(self, settings: Settings, repository: Repository) -> None:
@@ -175,11 +175,14 @@ class LlmClient:
             )
             return False, f"gate_3_recent_sonnet_call: {len(recent_calls)} call(s)"
 
-        # Gate 4: estimated_tokens + today's spend < SONNET_DAILY_TOKEN_BUDGET
+        # Gate 4: atomic budget check — deducts tokens if within budget
         today_str = datetime.now(timezone.utc).date().isoformat()
-        spend_record = self._repository.get_sonnet_daily_spend(today_str)
-        tokens_used = int((spend_record.get("total_tokens_used") or 0) if spend_record else 0)
-        if tokens_used + estimated_tokens >= self._settings.SONNET_DAILY_TOKEN_BUDGET:
+        budget_ok = self._repository.check_and_deduct_sonnet_budget(
+            today_str, estimated_tokens, self._settings.SONNET_DAILY_TOKEN_BUDGET
+        )
+        if not budget_ok:
+            spend_record = self._repository.get_sonnet_daily_spend(today_str)
+            tokens_used = int((spend_record.get("total_tokens_used") or 0) if spend_record else 0)
             return (
                 False,
                 f"gate_4_budget_ceiling: used={tokens_used}, est={estimated_tokens}, "
@@ -344,11 +347,13 @@ class LlmClient:
                 }
             )
 
+            # Budget was pre-deducted by gate 4; reconcile actual vs estimated
             today_str = datetime.now(timezone.utc).date().isoformat()
-            # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
-            self._repository.update_sonnet_daily_spend(
-                today_str, input_tokens + output_tokens, 1
-            )
+            actual_tokens = input_tokens + output_tokens
+            estimated_tokens = self.estimate_tokens(prompt) + self._settings.SONNET_MAX_TOKENS
+            delta = actual_tokens - estimated_tokens
+            if delta != 0:
+                self._repository.update_sonnet_daily_spend(today_str, delta, 0)
 
             return result_text
 

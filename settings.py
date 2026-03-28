@@ -35,11 +35,11 @@ class Settings(BaseSettings):
     LSH_NUM_PERM: int = 128
 
     # --- Paths ---
-    ASSET_LIBRARY_PATH: str = "./data/asset_library.pkl"
+    ASSET_LIBRARY_PATH: str = "./data/asset_library.json"
     SEC_EDGAR_EMAIL: str = "research@example.com"
     DB_PATH: str = "./data/narrative_engine.db"
-    LSH_INDEX_PATH: str = "./data/lsh_index.pkl"
-    FAISS_INDEX_PATH: str = "./data/faiss_index.pkl"
+    LSH_INDEX_PATH: str = "./data/lsh_index.json"
+    FAISS_INDEX_PATH: str = "./data/faiss_index"
 
     # --- Ingestion ---
     SCRAPE_MAX_THREADS: int = 3
