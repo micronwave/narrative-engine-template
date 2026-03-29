@@ -6,6 +6,8 @@ Detects and tracks large-scale financial narratives as they form, mutate, and de
 
 Not a trading system. This watches the stories that move markets, not the markets themselves.
 
+<img width="1261" height="1191" alt="btc" src="https://github.com/user-attachments/assets/8ef67db0-6ba7-4143-aa22-7d72f93b90cf" />
+
 ## Quick start
 
 ```bash
