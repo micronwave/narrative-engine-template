@@ -75,12 +75,12 @@ The system tracks 15 numeric signals per narrative per cycle. Not all signals ar
 
 **Tier 1 — strongest predictors of next-day price movement:**
 
-| Signal | Avg |r| | Direction | What it tells you |
-|--------|---------|-----------|-------------------|
-| Burst ratio | 0.415 | Mixed | A sudden spike in coverage predicts price *volatility* — something is about to move |
-| Centrality | 0.401 | Negative | When a narrative becomes the hub connecting all other stories, linked assets tend to *decline* — the trade is already crowded |
-| Document count | 0.396 | Positive | More coverage → price rises. The most stable signal across all validation runs |
-| Windowed velocity | 0.375 | Positive | How fast the narrative is accelerating, recency-weighted. Raw velocity (0.289) is far inferior |
+| Signal | Strength | Direction |
+|--------|----------|-----------|
+| Burst ratio | 0.415 | Mixed — predicts volatility, not direction |
+| Centrality | 0.401 | Negative — hub narratives signal crowded trades |
+| Document count | 0.396 | Positive — more coverage, price rises |
+| Windowed velocity | 0.375 | Positive — recency-weighted acceleration |
 
 **Key findings:**
 - **Volume signals dominate.** Narrative attention (how much coverage, how fast it's growing, whether it's spiking) is more predictive than sentiment, cohesion, or any other signal class.
