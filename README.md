@@ -69,6 +69,44 @@ RSS / SEC EDGAR / Reddit / MarketAux / NewsData
 
 Each step is non-fatal — if one stage throws, it logs the error and the pipeline keeps going.
 
+## Signal effectiveness
+
+The system tracks 15 numeric signals per narrative per cycle. Not all signals are equally useful. Early validation across 17 narrative/ticker pairs shows a clear hierarchy:
+
+**Tier 1 — strongest predictors of next-day price movement:**
+
+| Signal | Avg |r| | Direction | What it tells you |
+|--------|---------|-----------|-------------------|
+| Burst ratio | 0.415 | Mixed | A sudden spike in coverage predicts price *volatility* — something is about to move |
+| Centrality | 0.401 | Negative | When a narrative becomes the hub connecting all other stories, linked assets tend to *decline* — the trade is already crowded |
+| Document count | 0.396 | Positive | More coverage → price rises. The most stable signal across all validation runs |
+| Windowed velocity | 0.375 | Positive | How fast the narrative is accelerating, recency-weighted. Raw velocity (0.289) is far inferior |
+
+**Key findings:**
+- **Volume signals dominate.** Narrative attention (how much coverage, how fast it's growing, whether it's spiking) is more predictive than sentiment, cohesion, or any other signal class.
+- **Sentiment is weak.** Sentiment mean (0.242) is the *least* predictive signal. Sentiment variance (0.316) has some value as a volatility indicator but regresses with more data.
+- **Centrality is contrarian.** When one narrative connects everything in the graph, it means the market has already organized around it. High centrality → consensus → already priced in.
+- **The composite score (Ns) underperforms its own inputs.** The weighted aggregate (0.317) is less predictive than burst ratio, doc count, or velocity individually — the weighting formula dilutes signal from the strong components.
+- **Cross-source agreement is contrarian.** When many independent sources agree on a narrative (high cross-source score), prices tend to fall the next day. Consistent with crowded-trade dynamics.
+
+These results are directional (17 pairs, 2-16 observations each), not statistically robust yet. The validation suite in the codebase (`/api/correlations/`) lets you run your own analysis as data accumulates.
+
+## What makes this different
+
+Most news-as-signal systems work at the **entity level** — count articles about $NVDA, score their sentiment, trade on that. This system works at the **narrative level**: it clusters articles into stories first, tracks those stories as units, then maps them to assets.
+
+The difference matters because:
+
+1. **Narratives capture thematic shifts before they localize to tickers.** "Semiconductor supply chain stress" affects $NVDA, $TSM, $INTC, and $ASML simultaneously. Entity-level systems see four separate signals. This system sees one narrative with four asset mappings — and detects it earlier because the cluster forms before any single ticker accumulates enough coverage to trigger an alert.
+
+2. **The graph layer adds structural signal.** The system builds a network where narratives are nodes and semantic similarity creates edges. Betweenness centrality on that graph — which narrative sits at the crossroads of information flow — is a signal type that entity-level systems can't produce. It turned out to be the strongest directional predictor.
+
+3. **Convergence detection finds independent confirmation.** When two narratives form independently (low centroid similarity) but both map to the same ticker, that's convergence — the strongest signal class in the system. Two separate stories pointing the same direction on the same asset, from different source clusters, is more informative than either story alone.
+
+4. **Volume over sentiment.** The academic literature supports this (Fang & Peress 2009, Barber & Odean 2008, Da et al. 2011): the *amount* of coverage predicts price movement more reliably than the *tone* of coverage. This system is built around that finding — burst detection, velocity tracking, source counting, and escalation monitoring are all volume-based signals.
+
+Commercial platforms in this space (RavenPack, MarketPsych/LSEG, Predata, Bloomberg Event-Driven Feeds) sell entity-level news analytics to institutional desks. The narrative-first architecture and graph-topology signals are less explored territory.
+
 ## Stack
 
 **Backend:** Python 3.12, FastAPI (66 endpoints), SQLite, FAISS, HDBSCAN, sentence-transformers, Claude API (Haiku + Sonnet)
@@ -93,6 +131,10 @@ Each step is non-fatal — if one stage throws, it logs the error and the pipeli
 | `/brief/[ticker]` | Pre-earnings intelligence brief with price history and correlation links |
 | `/correlation` | Velocity-price correlation explorer (Pearson r, lead-time sweep) |
 | `/portfolio` | Portfolio holdings with narrative exposure tracking |
+| `/alerts` | Alert management with real-time SSE streaming |
+| `/dashboard` | Customizable widget grid (10 widget types) |
+| `/sentiment` | Social sentiment analysis across sources |
+| `/social` | Social mentions and trending narratives |
 | `/analytics` | Aggregate analytics — leaderboards, timelines, heatmaps |
 
 ## Key modules
