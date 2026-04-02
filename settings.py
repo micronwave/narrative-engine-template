@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     HAIKU_MAX_TOKENS: int = 512
     SONNET_MAX_TOKENS: int = 2048
     SONNET_DAILY_TOKEN_BUDGET: int = 200000
+    LLM_DAILY_BUDGET_USD: float = 5.0
 
     # --- Embedding ---
     EMBEDDING_MODEL_NAME: str = "all-mpnet-base-v2"
@@ -22,24 +23,27 @@ class Settings(BaseSettings):
 
     # --- Narrative tracking ---
     CENTROID_ALPHA: float = 0.15
-    NOISE_BUFFER_THRESHOLD: int = 200
+    NOISE_BUFFER_THRESHOLD: int = 300
     ASSIGNMENT_SIMILARITY_FLOOR: float = 0.45
-    CONFIDENCE_ESCALATION_THRESHOLD: float = 0.60
+    CONFIDENCE_ESCALATION_THRESHOLD: float = 0.35
     VELOCITY_WINDOW_DAYS: int = 7
     ENTROPY_VOCAB_WINDOW: int = 10
-    HDBSCAN_MIN_CLUSTER_SIZE: int = 5
-    HDBSCAN_MIN_SAMPLES: int = 3
+    HDBSCAN_MIN_CLUSTER_SIZE: int = 8  # For smaller datasets, try 5 and 3 respectively
+    HDBSCAN_MIN_SAMPLES: int = 5  # For smaller datasets, try 5 and 3 respectively
+
+    # --- Asset mapping ---
+    ASSET_MAPPING_MIN_SIMILARITY: float = 0.60
 
     # --- LSH deduplication ---
     LSH_THRESHOLD: float = 0.85
     LSH_NUM_PERM: int = 128
 
     # --- Paths ---
-    ASSET_LIBRARY_PATH: str = "./data/asset_library.json"
+    ASSET_LIBRARY_PATH: str = "./data/asset_library.pkl"
     SEC_EDGAR_EMAIL: str = "research@example.com"
     DB_PATH: str = "./data/narrative_engine.db"
-    LSH_INDEX_PATH: str = "./data/lsh_index.json"
-    FAISS_INDEX_PATH: str = "./data/faiss_index"
+    LSH_INDEX_PATH: str = "./data/lsh_index.pkl"
+    FAISS_INDEX_PATH: str = "./data/faiss_index.pkl"
 
     # --- Ingestion ---
     SCRAPE_MAX_THREADS: int = 3
@@ -77,6 +81,16 @@ class Settings(BaseSettings):
     SIGNAL_EXTRACTION_STALENESS_HOURS: int = 24
     CONVERGENCE_INDEPENDENCE_THRESHOLD: float = 0.30
 
+    # --- Phase 4: Catalyst anchoring ---
+    FRED_API_KEY: str = ""
+    CATALYST_LOOKFORWARD_DAYS: int = 14
+    FRED_CACHE_TTL_HOURS: int = 6
+
+    # --- Phase 5: Learned signal weights ---
+    SIGNAL_MODEL_PATH: str = "./data/signal_model.pkl"
+    SIGNAL_MODEL_RETRAIN_DAYS: int = 7
+    SIGNAL_MIN_TRAINING_SAMPLES: int = 30
+
     # --- API feature flags ---
     ENABLE_MARKETAUX: bool = True
     ENABLE_NEWSDATA: bool = True
@@ -84,27 +98,43 @@ class Settings(BaseSettings):
     ENABLE_EDGAR: bool = False
     EDGAR_EMAIL: str = ""
     EDGAR_COMPANY_NAME: str = "NarrativeIntelligenceEngine"
+    EDGAR_TICKERS: str = ""  # comma-separated list, e.g. "AAPL,MSFT,NVDA"
 
     # TRADIER_API_KEY intentionally deferred. Options data integration planned for later phase.
 
     # --- X/Twitter automated posting ---
+    # Optional: bot integration (not included in template)
     TWITTER_API_KEY: str = ""
     TWITTER_API_SECRET: str = ""
     TWITTER_ACCESS_TOKEN: str = ""
     TWITTER_ACCESS_TOKEN_SECRET: str = ""
-    TWITTER_ENABLED: bool = False
+    TWITTER_ENABLED: bool = False  # Optional: bot integration (not included in template)
     TWITTER_DAILY_BUDGET: int = 12
 
     # --- Typefully (posts to X without X API credits) ---
+    # Optional: bot integration (not included in template)
     TYPEFULLY_API_KEY: str = ""
     TYPEFULLY_SOCIAL_SET_ID: str = ""
-    TYPEFULLY_ENABLED: bool = False
+    TYPEFULLY_ENABLED: bool = False  # Optional: bot integration (not included in template)
     TYPEFULLY_DAILY_BUDGET: int = 1
     TYPEFULLY_MONTHLY_BUDGET: int = 15
 
     # --- Discord webhook (draft queue for manual posting) ---
     DISCORD_WEBHOOK_URL: str = ""
     DISCORD_WEBHOOK_ENABLED: bool = False
+
+    # --- SMTP / Email channel ---
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_FROM: str = ""
+    SMTP_TO: str = ""
+    SMTP_PASSWORD: str = ""
+
+    # --- Generic webhook channel ---
+    NOTIFICATION_WEBHOOK_URL: str = ""
+
+    # --- Environment ---
+    ENVIRONMENT: str = "development"
 
     # --- Auth ---
     AUTH_MODE: str = "stub"

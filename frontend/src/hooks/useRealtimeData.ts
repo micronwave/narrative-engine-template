@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getApiToken } from "@/lib/api";
 
 type Config<T> = {
   endpoint: string;
@@ -46,7 +47,10 @@ export function useRealtimeData<T>({
 
     async function poll() {
       try {
-        const res = await fetch(endpoint);
+        const headers: Record<string, string> = {};
+        const tok = getApiToken();
+        if (tok) headers["x-auth-token"] = tok;
+        const res = await fetch(endpoint, { headers });
         if (!res.ok) throw new Error(`${endpoint} fetch failed: ${res.status}`);
         const data: T = await res.json();
         if (!active) return;

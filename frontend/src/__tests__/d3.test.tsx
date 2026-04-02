@@ -33,6 +33,7 @@ jest.mock("@/lib/api", () => ({
   fetchStockDetail: jest.fn(),
   fetchNarrativeAssets: jest.fn(),
   fetchAssets: jest.fn(),
+  fetchPriceHistory: jest.fn().mockResolvedValue({ symbol: "TSM", data: [], available: false }),
 }));
 
 import StocksPage from "../app/stocks/page";

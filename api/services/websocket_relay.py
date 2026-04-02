@@ -13,6 +13,7 @@ import asyncio
 import collections
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,13 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 _FINNHUB_WS_URL = "wss://ws.finnhub.io"
+
+_TOKEN_RE = re.compile(r'token=[^&\s]+')
+
+
+def _redact_url(text: str) -> str:
+    """Replace API token values in URLs with '***'."""
+    return _TOKEN_RE.sub('token=***', str(text))
 
 
 class FinnhubWebSocketRelay:
@@ -105,7 +113,7 @@ class FinnhubWebSocketRelay:
                 await self._connect_and_listen()
                 backoff = 1  # reset on clean disconnect
             except Exception as e:
-                logger.warning("[WS Relay] Connection error: %s", e)
+                logger.warning("[WS Relay] Connection error: %s", _redact_url(str(e)))
             finally:
                 self._connected = False
 
@@ -160,8 +168,15 @@ class FinnhubWebSocketRelay:
 
         # NOTE: Assumes single uvicorn worker. Multi-worker deployment would cause duplicate WebSocket connections.
         url = f"{_FINNHUB_WS_URL}?token={self._api_key}"
-        logger.info("[WS Relay] Connecting to Finnhub WebSocket")
-        async with websockets.connect(url, ping_interval=30, ping_timeout=10) as ws:
+        logger.info("[WS Relay] Connecting to Finnhub WebSocket (token=***%s)",
+                     self._api_key[-4:] if len(self._api_key) > 4 else "****")
+        try:
+            ws = await websockets.connect(url, ping_interval=30, ping_timeout=10)
+        except Exception as e:
+            logger.error("[WS Relay] Connection failed: %s", _redact_url(str(e)))
+            raise RuntimeError(_redact_url(str(e))) from None
+
+        async with ws:
             self._ws = ws
             self._connected = True
             logger.info("[WS Relay] Connected to Finnhub WebSocket")
@@ -183,7 +198,7 @@ class FinnhubWebSocketRelay:
                 try:
                     self._handle_message(raw_msg)
                 except Exception as e:
-                    logger.debug("[WS Relay] Message parse error: %s", e)
+                    logger.debug("[WS Relay] Message parse error: %s", _redact_url(str(e)))
 
     async def _sync_subscriptions(self, desired: set[str]):
         """Subscribe to new symbols, unsubscribe from removed ones."""
@@ -203,13 +218,13 @@ class FinnhubWebSocketRelay:
         try:
             await ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
         except Exception as e:
-            logger.debug("[WS Relay] Subscribe error for %s: %s", symbol, e)
+            logger.debug("[WS Relay] Subscribe error for %s: %s", symbol, _redact_url(str(e)))
 
     async def _send_unsubscribe(self, ws, symbol: str):
         try:
             await ws.send(json.dumps({"type": "unsubscribe", "symbol": symbol}))
         except Exception as e:
-            logger.debug("[WS Relay] Unsubscribe error for %s: %s", symbol, e)
+            logger.debug("[WS Relay] Unsubscribe error for %s: %s", symbol, _redact_url(str(e)))
 
     def _handle_message(self, raw_msg: str):
         """Parse a Finnhub trade message and buffer ticks."""

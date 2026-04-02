@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X, TrendingUp, TrendingDown, ArrowLeftRight, HelpCircle } from "lucide-react";
-import type { StockDetail } from "@/lib/api";
+import type { StockDetail, PriceHistoryResponse } from "@/lib/api";
+import { fetchPriceHistory } from "@/lib/api";
+import CandlestickChart from "@/components/CandlestickChart";
+import TimeframeSelector from "@/components/TimeframeSelector";
 
 type Props = {
   isOpen: boolean;
@@ -27,6 +30,15 @@ function directionColor(direction: string): string {
 
 export default function StockDetailDrawer({ isOpen, stockDetail, loading, onClose }: Props) {
   const drawerRef = useRef<HTMLDivElement>(null);
+  const [priceHistory, setPriceHistory] = useState<PriceHistoryResponse | null>(null);
+  const [chartDays, setChartDays] = useState(30);
+
+  useEffect(() => {
+    if (!isOpen || !stockDetail) return;
+    fetchPriceHistory(stockDetail.symbol, chartDays)
+      .then(setPriceHistory)
+      .catch(() => setPriceHistory(null));
+  }, [isOpen, stockDetail, chartDays]);
 
   // Focus trap + Escape key
   useEffect(() => {
@@ -146,6 +158,21 @@ export default function StockDetailDrawer({ isOpen, stockDetail, loading, onClos
                     {stockDetail.price_change_24h >= 0 ? "+" : "\u2212"}
                     {Math.abs(stockDetail.price_change_24h).toFixed(2)}% today
                   </p>
+                )}
+              </div>
+
+              {/* Mini Candlestick Chart */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs uppercase tracking-widest text-accent-text font-medium border-l-2 border-l-accent-primary pl-2">Price Chart</p>
+                  <TimeframeSelector selected={chartDays} onChange={setChartDays} small />
+                </div>
+                {priceHistory && priceHistory.available && priceHistory.data.length > 1 ? (
+                  <CandlestickChart symbol={stockDetail.symbol} data={priceHistory.data} height={200} />
+                ) : (
+                  <div className="flex items-center justify-center text-text-tertiary text-xs bg-inset rounded-sm h-14">
+                    {priceHistory === null ? "Loading…" : "No data"}
+                  </div>
                 )}
               </div>
 

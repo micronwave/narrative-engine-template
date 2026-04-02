@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { AlertTriangle, TrendingUp, TrendingDown, ArrowLeftRight, HelpCircle, Shield, ArrowLeft } from "lucide-react";
+import { AlertTriangle, TrendingUp, TrendingDown, ArrowLeftRight, HelpCircle, Shield, ArrowLeft, Bell, X } from "lucide-react";
 import Link from "next/link";
-import { fetchBrief, fetchPriceHistory, type TickerBrief, type PriceHistoryResponse } from "@/lib/api";
-import HistoryChart from "@/components/HistoryChart";
+import { fetchBrief, fetchPriceHistory, createAlertRule, type TickerBrief, type PriceHistoryResponse } from "@/lib/api";
+import CandlestickChart from "@/components/CandlestickChart";
+import TimeframeSelector from "@/components/TimeframeSelector";
+import IndicatorOverlay, { type IndicatorConfig, DEFAULT_INDICATORS } from "@/components/IndicatorOverlay";
 import Skeleton from "@/components/common/Skeleton";
 
 function DirectionBadge({ direction }: { direction: string }) {
@@ -32,20 +34,152 @@ function stageBadgeClass(stage: string): string {
   return "bg-accent-muted text-accent-text";
 }
 
+function SetAlertModal({
+  ticker,
+  currentPrice,
+  onClose,
+}: {
+  ticker: string;
+  currentPrice: number | null;
+  onClose: () => void;
+}) {
+  const ALERT_TYPES = [
+    { value: "price_above", label: "Price Above" },
+    { value: "price_below", label: "Price Below" },
+    { value: "rsi_overbought", label: "RSI Overbought" },
+    { value: "rsi_oversold", label: "RSI Oversold" },
+  ];
+  const [ruleType, setRuleType] = useState("price_above");
+  const [threshold, setThreshold] = useState(
+    currentPrice ? String(Math.round(currentPrice * 1.05 * 100) / 100) : "0"
+  );
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const quickSets = currentPrice
+    ? [
+        { label: "+5%", value: Math.round(currentPrice * 1.05 * 100) / 100 },
+        { label: "+10%", value: Math.round(currentPrice * 1.10 * 100) / 100 },
+        { label: "-5%", value: Math.round(currentPrice * 0.95 * 100) / 100 },
+        { label: "-10%", value: Math.round(currentPrice * 0.90 * 100) / 100 },
+      ]
+    : [];
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const targetType = ruleType.startsWith("rsi") ? "ticker" : "ticker";
+      await createAlertRule(ruleType, targetType, ticker, parseFloat(threshold) || 0);
+      setSaved(true);
+      setTimeout(onClose, 1000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create alert");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div
+        className="bg-surface border border-[var(--bg-border)] rounded-sm w-full max-w-sm mx-4 p-5"
+        style={{ boxShadow: "0 4px 32px rgba(0,0,0,0.5)" }}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-[14px] font-semibold text-text-primary">
+            Set Alert — {ticker}
+          </h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <div>
+            <label className="label-micro mb-1 block">Alert Type</label>
+            <select
+              value={ruleType}
+              onChange={(e) => setRuleType(e.target.value)}
+              className="w-full bg-inset border border-[var(--bg-border)] rounded-sm font-mono text-[12px] text-text-primary px-2 py-1.5"
+            >
+              {ALERT_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="label-micro mb-1 block">
+              {ruleType.startsWith("rsi") ? "RSI Level" : "Price ($)"}
+            </label>
+            {quickSets.length > 0 && !ruleType.startsWith("rsi") && (
+              <div className="flex gap-1 mb-1.5 flex-wrap">
+                {quickSets.map((q) => (
+                  <button
+                    key={q.label}
+                    onClick={() => setThreshold(String(q.value))}
+                    className="font-mono text-[10px] px-1.5 py-0.5 border border-[var(--bg-border)] rounded-sm text-text-muted hover:text-text-primary transition-colors"
+                  >
+                    {q.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <input
+              type="number"
+              value={threshold}
+              onChange={(e) => setThreshold(e.target.value)}
+              className="w-full bg-inset border border-[var(--bg-border)] rounded-sm font-mono text-[12px] text-text-primary px-2 py-1.5"
+            />
+          </div>
+
+          {error && <p className="font-mono text-[11px] text-bearish">{error}</p>}
+          {saved && <p className="font-mono text-[11px] text-bullish">Alert created!</p>}
+
+          <div className="flex gap-2 mt-1">
+            <button
+              onClick={handleSave}
+              disabled={saving || saved}
+              className="flex-1 bg-accent-muted text-accent-text font-mono text-[12px] py-1.5 rounded-sm hover:opacity-80 transition-opacity disabled:opacity-50"
+            >
+              {saving ? "Saving…" : saved ? "Saved!" : "Create Alert"}
+            </button>
+            <button
+              onClick={onClose}
+              className="px-3 border border-[var(--bg-border)] text-text-muted font-mono text-[12px] py-1.5 rounded-sm hover:text-text-primary transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function BriefPage() {
   const params = useParams();
   const ticker = (params.ticker as string) || "";
 
   const [brief, setBrief] = useState<TickerBrief | null>(null);
   const [priceHistory, setPriceHistory] = useState<PriceHistoryResponse | null>(null);
+  const [selectedDays, setSelectedDays] = useState(30);
+  const [indicators, setIndicators] = useState<IndicatorConfig[]>(DEFAULT_INDICATORS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showAlertModal, setShowAlertModal] = useState(false);
 
   useEffect(() => {
     if (!ticker) return;
-    fetchPriceHistory(ticker, 30)
+    fetchPriceHistory(ticker, selectedDays)
       .then(setPriceHistory)
       .catch(() => setPriceHistory(null));
+  }, [ticker, selectedDays]);
+
+  useEffect(() => {
+    if (!ticker) return;
     fetchBrief(ticker)
       .then(setBrief)
       .catch((err: Error) => setError(err.message))
@@ -117,29 +251,39 @@ export default function BriefPage() {
               <span className="text-text-secondary text-[13px] ml-3">{security.name}</span>
               <span className="text-text-muted text-[12px] ml-2">{security.exchange}</span>
             </div>
-            <div className="text-right">
-              {security.current_price !== null ? (
-                <>
-                  <span className="font-mono text-[16px] text-text-primary">
-                    ${security.current_price.toLocaleString("en-US", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </span>
-                  {security.price_change_24h !== null && (
-                    <span
-                      className={`font-mono text-[13px] ml-2 ${
-                        security.price_change_24h >= 0 ? "text-bullish" : "text-bearish"
-                      }`}
-                    >
-                      {security.price_change_24h >= 0 ? "+" : "\u2212"}
-                      {Math.abs(security.price_change_24h).toFixed(2)}%
+            <div className="flex items-center gap-3">
+              <div className="text-right">
+                {security.current_price !== null ? (
+                  <>
+                    <span className="font-mono text-[16px] text-text-primary">
+                      ${security.current_price.toLocaleString("en-US", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
                     </span>
-                  )}
-                </>
-              ) : (
-                <span className="text-text-muted">—</span>
-              )}
+                    {security.price_change_24h !== null && (
+                      <span
+                        className={`font-mono text-[13px] ml-2 ${
+                          security.price_change_24h >= 0 ? "text-bullish" : "text-bearish"
+                        }`}
+                      >
+                        {security.price_change_24h >= 0 ? "+" : "\u2212"}
+                        {Math.abs(security.price_change_24h).toFixed(2)}%
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-text-muted">—</span>
+                )}
+              </div>
+              <button
+                onClick={() => setShowAlertModal(true)}
+                className="flex items-center gap-1.5 font-mono text-[11px] text-text-muted hover:text-accent-text transition-colors border border-[var(--bg-border)] px-2 py-1 rounded-sm"
+                title="Set price alert"
+              >
+                <Bell size={12} />
+                Set Alert
+              </button>
             </div>
           </div>
         )}
@@ -190,18 +334,24 @@ export default function BriefPage() {
         </p>
 
         {/* Price History Chart */}
-        {priceHistory && priceHistory.available && priceHistory.data.length > 1 && (
-          <section className="mt-8 mb-2">
-            <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary mb-3">
+        <section className="mt-8 mb-2">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
               Price History
-              <span className="font-mono text-[11px] font-normal text-text-muted ml-2">30d</span>
             </h2>
-            <HistoryChart
-              data={priceHistory.data.map((p) => ({ date: p.date, value: p.close }))}
-              color="var(--accent-primary)"
-            />
-          </section>
-        )}
+            <TimeframeSelector selected={selectedDays} onChange={setSelectedDays} />
+          </div>
+          {priceHistory && priceHistory.available && priceHistory.data.length > 1 ? (
+            <>
+              <CandlestickChart symbol={ticker} data={priceHistory.data} height={320} indicators={indicators} />
+              <IndicatorOverlay data={priceHistory.data} onIndicatorsChange={setIndicators} />
+            </>
+          ) : (
+            <div className="flex items-center justify-center text-text-tertiary text-xs bg-inset rounded-sm h-20">
+              {priceHistory === null ? "Loading…" : "No price data available"}
+            </div>
+          )}
+        </section>
 
         {/* Affecting Narratives */}
         <div data-testid="brief-narratives" className="mt-8">
@@ -299,6 +449,14 @@ export default function BriefPage() {
           </div>
         </div>
       </div>
+
+      {showAlertModal && (
+        <SetAlertModal
+          ticker={ticker}
+          currentPrice={security?.current_price ?? null}
+          onClose={() => setShowAlertModal(false)}
+        />
+      )}
     </main>
   );
 }

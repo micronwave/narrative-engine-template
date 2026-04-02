@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from llm_client import LlmClient
+from prompt_utils import sanitize_chat_input, sanitize_for_prompt, validate_chat_output
 from repository import SqliteRepository
 from settings import Settings
 
@@ -64,6 +65,10 @@ class ChatManager:
 
     def send_message(self, session_id: str, user_message: str) -> dict:
         """Sends message, gets Haiku response, saves both. Returns response dict."""
+        user_message = sanitize_chat_input(user_message)
+        if not user_message:
+            raise ValueError("Message cannot be empty")
+
         session = self.repository.get_chat_session(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
@@ -84,6 +89,7 @@ class ChatManager:
         )
 
         response = self.llm_client.call_haiku_chat(system_prompt, messages)
+        response["content"] = validate_chat_output(response["content"])
         now = datetime.now(timezone.utc).isoformat()
 
         self.repository.save_chat_message({
@@ -139,8 +145,8 @@ class ChatManager:
                         linked = linked
                 parts.append(
                     f"Current Narrative Context:\n"
-                    f"Name: {narrative.get('name', 'Unknown')}\n"
-                    f"Description: {narrative.get('description', 'N/A')}\n"
+                    f"Name: {sanitize_for_prompt(narrative.get('name', 'Unknown'))}\n"
+                    f"Description: {sanitize_for_prompt(narrative.get('description', 'N/A'), max_len=300)}\n"
                     f"Ns Score: {float(narrative.get('ns_score') or 0):.2f}\n"
                     f"Lifecycle Stage: {narrative.get('stage', 'unknown')}\n"
                     f"Linked Assets: {linked}\n"
@@ -154,7 +160,7 @@ class ChatManager:
                 parts.append(
                     f"Stock Context: {ticker}\n"
                     f"Linked Narratives: {len(narratives)}\n"
-                    f"Top Narrative: {narratives[0]['name']}"
+                    f"Top Narrative: {sanitize_for_prompt(narratives[0]['name'])}"
                 )
 
         if not parts:

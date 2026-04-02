@@ -79,14 +79,8 @@ _HEDGE_PATTERNS: list[re.Pattern] = [
     for term in HEDGE_VOCAB
 ]
 
-# Ticker regex: 2-5 uppercase letters at word boundaries (1-letter excluded to avoid noise).
-_TICKER_RE = re.compile(r"\b[A-Z]{2,5}\b")
-_TICKER_STOPWORDS = frozenset({
-    "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL", "CAN", "HER",
-    "WAS", "ONE", "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW",
-    "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM", "LET", "SAY",
-    "SHE", "TOO", "USE", "CEO", "CFO", "COO", "USA", "GDP", "IPO", "SEC",
-})
+# Ticker regex: 1-5 uppercase letters at word boundaries.
+_TICKER_RE = re.compile(r"\b[A-Z]{1,5}\b")
 
 # POSITIVE/NEGATIVE word sets for O(1) lookup.
 _POS_SET = set(POSITIVE_WORDS)
@@ -176,7 +170,8 @@ def compute_entropy(
     entity_counts: Counter = Counter()
 
     for doc in documents:
-        tickers = [t for t in _TICKER_RE.findall(doc) if t not in _TICKER_STOPWORDS]
+        # Ticker symbols (uppercase letter sequences, word boundaries).
+        tickers = _TICKER_RE.findall(doc)
         entity_counts.update(tickers)
 
         # Fiscal/financial vocabulary terms (case-insensitive).
@@ -349,6 +344,7 @@ def compute_lifecycle_stage(
     entropy: float | None,
     consecutive_declining_days: int,
     days_since_creation: int,
+    cycles_in_current_stage: int = 0,
 ) -> str:
     """
     Returns the new lifecycle stage based on narrative metrics.
@@ -359,46 +355,79 @@ def compute_lifecycle_stage(
     1. Revival: Declining/Dormant with velocity > 0.10 → Growing
     2. Emerging → Growing: document_count >= 8 AND velocity_windowed > 0.05
     3. Growing → Mature: days >= 5 AND entropy >= 1.5 AND document_count >= 15
-    4. Mature → Declining: consecutive_declining_days >= 3 OR velocity < 0.02
+    4. Mature → Declining: consecutive_declining_days >= 5 OR velocity < 0.01
     5. Declining → Dormant: consecutive_declining_days >= 7 AND velocity < 0.01
 
+    Hysteresis: transitions (except revival) require >= 3 cycles in current stage.
     Never skips stages (Emerging cannot jump directly to Mature).
     """
-    # Revival check — applies before any other rule
+    # Revival check — applies before any other rule (no hysteresis)
     if current_stage in ("Declining", "Dormant") and velocity_windowed > 0.10:
         return "Growing"
 
+    # Compute proposed stage from rules
     if current_stage == "Emerging":
         if document_count >= 8 and velocity_windowed > 0.05:
-            return "Growing"
-        return "Emerging"
+            proposed = "Growing"
+        else:
+            proposed = "Emerging"
 
-    if current_stage == "Growing":
+    elif current_stage == "Growing":
         if (days_since_creation >= 5
                 and entropy is not None
                 and entropy >= 1.5
                 and document_count >= 15):
-            return "Mature"
-        return "Growing"
+            proposed = "Mature"
+        else:
+            proposed = "Growing"
 
-    if current_stage == "Mature":
-        if consecutive_declining_days >= 3 or velocity_windowed < 0.02:
-            return "Declining"
-        return "Mature"
+    elif current_stage == "Mature":
+        if consecutive_declining_days >= 5 or velocity_windowed < 0.01:
+            proposed = "Declining"
+        else:
+            proposed = "Mature"
 
-    if current_stage == "Declining":
+    elif current_stage == "Declining":
         if consecutive_declining_days >= 7 and velocity_windowed < 0.01:
-            return "Dormant"
-        return "Declining"
+            proposed = "Dormant"
+        else:
+            proposed = "Declining"
 
-    # Dormant stays dormant unless revived (handled above)
-    logger.warning("Unknown lifecycle stage '%s' — returning unchanged", current_stage)
-    return current_stage
+    else:
+        # Dormant stays dormant unless revived (handled above)
+        logger.warning("Unknown lifecycle stage '%s' — returning unchanged", current_stage)
+        return current_stage
+
+    # Hysteresis gate: suppress transitions if not enough cycles in current stage
+    if proposed != current_stage and cycles_in_current_stage < 3:
+        return current_stage
+
+    return proposed
 
 
 # ---------------------------------------------------------------------------
 # Burst velocity (F2)
 # ---------------------------------------------------------------------------
+
+def compute_inflow_velocity(
+    doc_count_current_cycle: int,
+    avg_docs_per_cycle_7d: float,
+) -> float:
+    """
+    Measures how fast documents are arriving relative to the 7-day average.
+
+    Returns:
+    - 1.0 = average flow rate
+    - >1.0 = accelerating (more docs than usual)
+    - <1.0 = decelerating
+    - 0.0 = no documents this cycle
+
+    Clamped to [0.0, 10.0] to prevent outlier spikes.
+    """
+    if avg_docs_per_cycle_7d < 1.0:
+        avg_docs_per_cycle_7d = 1.0
+    return min(doc_count_current_cycle / avg_docs_per_cycle_7d, 10.0)
+
 
 def compute_burst_velocity(
     recent_doc_count: int,

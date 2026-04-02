@@ -1,9 +1,8 @@
 # Environment — never commit secrets
 .env
 
-# Runtime data (keep .gitkeep)
-data/*
-!data/.gitkeep
+# Runtime data
+data/
 *.db
 *.pkl
 
@@ -31,17 +30,26 @@ build/
 node_modules/
 frontend/.next/
 
-# Logs (keep .gitkeep)
-logs/*
-!logs/.gitkeep
+# Signal validation charts (regenerated each run)
+signal_validation/*.png
 
-# Build journals
-BUILD_LOG.md
-frontend_build_log
+# Logs
+logs/
 
-# Private planning
-prod_plan/
+# Additional environment files
+.env.*
+.env.local
+.env.production
 
-# Security
-*.secret
-*.pem
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.swp
+*.swo
+*~
+
+# Log files (individual, in case they're outside logs/)
+*.log

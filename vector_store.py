@@ -1,7 +1,9 @@
-import json
 import logging
+import pickle
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+from safe_pickle import safe_load
 
 import faiss
 import numpy as np
@@ -100,46 +102,39 @@ class FaissVectorStore(VectorStore):
         logger.info("Initialized fresh FAISS IndexFlatIP with dimension=%d", dimension)
 
     def load(self) -> bool:
-        """Load FAISS index + JSON id mappings from disk. Returns False if missing."""
-        faiss_path = Path(self._index_path + ".faiss")
-        meta_path = Path(self._index_path + ".meta.json")
-        if not faiss_path.exists() or not meta_path.exists():
-            # Backwards compat: try legacy pickle format
-            return self._load_legacy_pickle()
-        try:
-            self.index = faiss.read_index(str(faiss_path))
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            self.index_to_id = meta["index_to_id"]
-            self.id_to_index = {doc_id: i for i, doc_id in enumerate(self.index_to_id)}
-            logger.info("Loaded FAISS index from %s (%d vectors)", self._index_path, self.count())
-            return True
-        except Exception as exc:
-            logger.warning("FAISS index unusable at %s (%s) — reinitializing", self._index_path, exc)
-            self.index = None
-            self.id_to_index = {}
-            self.index_to_id = []
-            return False
-
-    def _load_legacy_pickle(self) -> bool:
-        """One-time migration: load old pickle format, then re-save as native."""
-        import pickle
+        """Load index from disk. Returns False if file does not exist.
+        Handles corrupt files by cleaning up and returning False."""
         path = Path(self._index_path)
         if not path.exists():
             return False
         try:
-            with open(path, "rb") as f:
-                loaded = pickle.load(f)  # noqa: S301
+            loaded = safe_load(str(path), allowed={
+                "builtins": {"dict", "list", "tuple", "str", "int", "float", "bool"},
+                "numpy": {"ndarray", "dtype", "float64", "float32", "int64"},
+                "numpy.core.multiarray": {"scalar", "_reconstruct"},
+                "numpy._core.multiarray": {"scalar", "_reconstruct"},
+                # FAISS index types — discover via logging technique in safe_pickle.py
+            })
             if not isinstance(loaded, tuple) or len(loaded) != 3:
-                raise TypeError(f"Expected 3-tuple, got {type(loaded).__name__}")
+                raise TypeError(
+                    f"Expected 3-tuple, got {type(loaded).__name__}"
+                )
             idx, id_map, id_list = loaded
+            if not isinstance(id_map, dict) or not isinstance(id_list, list):
+                raise TypeError(
+                    f"Bad inner types: id_map={type(id_map).__name__}, "
+                    f"id_list={type(id_list).__name__}"
+                )
             self.index, self.id_to_index, self.index_to_id = idx, id_map, id_list
-            logger.info("Migrated legacy pickle FAISS index (%d vectors)", self.count())
-            self.save()
-            path.unlink(missing_ok=True)
+            logger.info(
+                "Loaded FAISS index from %s (%d vectors)", self._index_path, self.count()
+            )
             return True
         except Exception as exc:
-            logger.warning("Legacy FAISS pickle unusable (%s) — reinitializing", exc)
+            logger.warning(
+                "FAISS pickle unusable at %s (%s) — reinitializing",
+                self._index_path, exc,
+            )
             path.unlink(missing_ok=True)
             self.index = None
             self.id_to_index = {}
@@ -147,15 +142,14 @@ class FaissVectorStore(VectorStore):
             return False
 
     def save(self) -> None:
-        """Persist FAISS index as native binary + id mappings as JSON."""
-        faiss_tmp = self._index_path + ".faiss.tmp"
-        meta_tmp = self._index_path + ".meta.json.tmp"
-        faiss.write_index(self.index, faiss_tmp)
-        with open(meta_tmp, "w", encoding="utf-8") as f:
-            json.dump({"index_to_id": self.index_to_id}, f)
-        Path(faiss_tmp).replace(self._index_path + ".faiss")
-        Path(meta_tmp).replace(self._index_path + ".meta.json")
-        logger.info("Saved FAISS index to %s (%d vectors)", self._index_path, self.count())
+        """Persist the index and ID mappings to disk via atomic temp-file rename."""
+        tmp = self._index_path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump((self.index, self.id_to_index, self.index_to_id), f)
+        Path(tmp).replace(self._index_path)
+        logger.info(
+            "Saved FAISS index to %s (%d vectors)", self._index_path, self.count()
+        )
 
     def add(self, vectors: np.ndarray, ids: list[str]) -> None:
         """Add vectors with associated IDs to the index.

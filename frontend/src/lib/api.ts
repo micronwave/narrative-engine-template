@@ -25,6 +25,7 @@ export type VisibleNarrative = {
   source_stats?: { total: number; news: number; research: number; filings: number; other: number };
   last_evidence_at?: string;
   signal_direction?: "bullish" | "bearish" | "neutral" | null;
+  signal_confidence?: number | null;
   signal_certainty?: "speculative" | "rumored" | "expected" | "confirmed" | null;
   signal_catalyst_type?: string | null;
   blurred: false;
@@ -252,37 +253,70 @@ export type ConstellationData = {
 };
 
 // ---------------------------------------------------------------------------
+// Auth token management — module-level token for automatic injection
+// ---------------------------------------------------------------------------
+
+let _authToken: string | null = null;
+
+/** Called by AuthContext whenever the token changes. */
+export function setApiToken(token: string | null): void {
+  _authToken = token;
+}
+
+/** Returns the current module-level auth token. */
+export function getApiToken(): string | null {
+  return _authToken;
+}
+
+/** Builds headers with auth token injected. Extra headers override defaults. */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (_authToken) {
+    headers["x-auth-token"] = _authToken;
+  }
+  if (extra) {
+    Object.assign(headers, extra);
+  }
+  return headers;
+}
+
+/** H7: Builds fetch options with credentials: "include" for HttpOnly cookie auth. */
+function authFetch(extra?: RequestInit): RequestInit {
+  return { credentials: "include" as RequestCredentials, ...extra };
+}
+
+// ---------------------------------------------------------------------------
 // Fetch helpers — always call relative /api/* paths (proxied in dev)
 // ---------------------------------------------------------------------------
 
-export async function fetchNarratives(token?: string): Promise<Narrative[]> {
-  const headers: HeadersInit = token ? { "x-auth-token": token } : {};
-  const res = await fetch("/api/narratives", { headers });
+export async function fetchNarratives(): Promise<Narrative[]> {
+  const res = await fetch("/api/narratives", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narratives fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchTicker(): Promise<TickerItem[]> {
-  const res = await fetch("/api/ticker");
+  const res = await fetch("/api/ticker", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`ticker fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchNarrativeDetail(id: string): Promise<NarrativeDetail> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative detail fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchConstellation(): Promise<ConstellationData> {
-  const res = await fetch("/api/constellation");
+  const res = await fetch("/api/constellation", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`constellation fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCredits(token: string): Promise<InvestigationCredit> {
   const res = await fetch("/api/credits", {
-    headers: { "x-auth-token": token },
+    headers: authHeaders({ "x-auth-token": token }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`credits fetch failed: ${res.status}`);
   return res.json();
@@ -296,8 +330,9 @@ export async function topupCredits(
     throw new Error("topup amount must be a positive finite number");
   const res = await fetch("/api/credits/topup", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-auth-token": token },
+    headers: authHeaders({ "Content-Type": "application/json", "x-auth-token": token }),
     body: JSON.stringify({ amount }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`topup failed: ${res.status}`);
   return res.json();
@@ -310,7 +345,8 @@ export async function topupCredits(
 export async function useCredit(token: string): Promise<InvestigationCredit> {
   const res = await fetch("/api/credits/use", {
     method: "POST",
-    headers: { "x-auth-token": token },
+    headers: authHeaders({ "x-auth-token": token }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`use credit failed: ${res.status}`);
   return res.json();
@@ -322,7 +358,8 @@ export async function useCredit(token: string): Promise<InvestigationCredit> {
 
 export async function fetchSubscription(token: string): Promise<SubscriptionStatus> {
   const res = await fetch("/api/subscription", {
-    headers: { "x-auth-token": token },
+    headers: authHeaders({ "x-auth-token": token }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`subscription fetch failed: ${res.status}`);
   return res.json();
@@ -331,7 +368,8 @@ export async function fetchSubscription(token: string): Promise<SubscriptionStat
 export async function toggleSubscription(token: string): Promise<SubscriptionStatus> {
   const res = await fetch("/api/subscription/toggle", {
     method: "POST",
-    headers: { "x-auth-token": token },
+    headers: authHeaders({ "x-auth-token": token }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`subscription toggle failed: ${res.status}`);
   return res.json();
@@ -340,14 +378,15 @@ export async function toggleSubscription(token: string): Promise<SubscriptionSta
 export async function exportNarrative(id: string, token: string): Promise<Blob> {
   const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/export`, {
     method: "POST",
-    headers: { "x-auth-token": token },
+    headers: authHeaders({ "x-auth-token": token }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`export failed: ${res.status}`);
   return res.blob();
 }
 
 export async function fetchSignals(): Promise<Signal[]> {
-  const res = await fetch("/api/signals");
+  const res = await fetch("/api/signals", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`signals fetch failed: ${res.status}`);
   return res.json();
 }
@@ -357,19 +396,19 @@ export async function fetchSignals(): Promise<Signal[]> {
 // ---------------------------------------------------------------------------
 
 export async function fetchNarrativeAssets(id: string): Promise<NarrativeAsset[]> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/assets`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/assets`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative assets fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchAssetClasses(): Promise<AssetClass[]> {
-  const res = await fetch("/api/asset-classes");
+  const res = await fetch("/api/asset-classes", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`asset classes fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchSecurities(): Promise<TrackedSecurity[]> {
-  const res = await fetch("/api/securities");
+  const res = await fetch("/api/securities", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`securities fetch failed: ${res.status}`);
   return res.json();
 }
@@ -399,13 +438,13 @@ export async function fetchStocks(params?: {
   if (params?.asset_class) query.set("asset_class", params.asset_class);
   if (params?.min_impact !== undefined) query.set("min_impact", String(params.min_impact));
   const qs = query.toString();
-  const res = await fetch(`/api/stocks${qs ? `?${qs}` : ""}`);
+  const res = await fetch(`/api/stocks${qs ? `?${qs}` : ""}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`stocks fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchStockDetail(symbol: string): Promise<StockDetail> {
-  const res = await fetch(`/api/stocks/${encodeURIComponent(symbol)}`);
+  const res = await fetch(`/api/stocks/${encodeURIComponent(symbol)}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`stock detail fetch failed: ${res.status}`);
   return res.json();
 }
@@ -451,7 +490,7 @@ export async function fetchManipulation(params?: {
     query.set("min_confidence", String(params.min_confidence));
   if (params?.status) query.set("status", params.status);
   const qs = query.toString();
-  const res = await fetch(`/api/manipulation${qs ? `?${qs}` : ""}`);
+  const res = await fetch(`/api/manipulation${qs ? `?${qs}` : ""}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`manipulation fetch failed: ${res.status}`);
   return res.json();
 }
@@ -459,7 +498,7 @@ export async function fetchManipulation(params?: {
 export async function fetchNarrativeManipulation(
   id: string
 ): Promise<ManipulationIndicator[]> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/manipulation`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/manipulation`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative manipulation fetch failed: ${res.status}`);
   return res.json();
 }
@@ -502,7 +541,7 @@ export type TickerBrief = {
 };
 
 export async function fetchBrief(ticker: string): Promise<TickerBrief> {
-  const res = await fetch(`/api/brief/${encodeURIComponent(ticker)}`);
+  const res = await fetch(`/api/brief/${encodeURIComponent(ticker)}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`brief fetch failed: ${res.status}`);
   return res.json();
 }
@@ -522,9 +561,19 @@ export type NarrativeSnapshot = {
   burst_ratio: number | null;
 };
 
+export type OHLCVBar = {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  change_pct: number;
+};
+
 export type PriceHistoryResponse = {
   symbol: string;
-  data: { date: string; close: number; change_pct: number }[];
+  data: OHLCVBar[];
   available: boolean;
 };
 
@@ -532,17 +581,47 @@ export async function fetchNarrativeHistory(
   id: string,
   days: number = 30
 ): Promise<NarrativeSnapshot[]> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/history?days=${days}`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/history?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative history fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchPriceHistory(
   symbol: string,
-  days: number = 30
+  days: number = 30,
+  interval: string = "1d"
 ): Promise<PriceHistoryResponse> {
-  const res = await fetch(`/api/ticker/${encodeURIComponent(symbol)}/price-history?days=${days}`);
+  const params = new URLSearchParams({ days: String(days), interval });
+  const res = await fetch(`/api/ticker/${encodeURIComponent(symbol)}/price-history?${params}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`price history fetch failed: ${res.status}`);
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Part B — Signal endpoints
+// ---------------------------------------------------------------------------
+
+export async function fetchNarrativeSignal(id: string): Promise<{ narrative_id: string; signal: NarrativeSignal | null }> {
+  const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/signal`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`narrative signal fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export type SignalLeaderboardEntry = {
+  narrative_id: string;
+  name: string;
+  stage: string | null;
+  direction: "bullish" | "bearish" | "neutral";
+  confidence: number;
+  magnitude: string | null;
+  certainty: string | null;
+  catalyst_type: string | null;
+  signal_strength: number;
+};
+
+export async function fetchSignalLeaderboard(limit: number = 50): Promise<SignalLeaderboardEntry[]> {
+  const res = await fetch(`/api/signals/leaderboard?limit=${limit}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`signal leaderboard fetch failed: ${res.status}`);
   return res.json();
 }
 
@@ -567,7 +646,8 @@ export async function fetchCorrelation(
   leadDays: number = 1
 ): Promise<CorrelationResult> {
   const res = await fetch(
-    `/api/correlations/${encodeURIComponent(narrativeId)}/${encodeURIComponent(ticker)}?lead_days=${leadDays}`
+    `/api/correlations/${encodeURIComponent(narrativeId)}/${encodeURIComponent(ticker)}?lead_days=${leadDays}`,
+    { headers: authHeaders(), credentials: "include" }
   );
   if (!res.ok) throw new Error(`correlation fetch failed: ${res.status}`);
   return res.json();
@@ -586,7 +666,7 @@ export type ActivityItem = {
 };
 
 export async function fetchActivity(limit = 100): Promise<ActivityItem[]> {
-  const res = await fetch(`/api/activity?limit=${limit}`);
+  const res = await fetch(`/api/activity?limit=${limit}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`activity fetch failed: ${res.status}`);
   return res.json();
 }
@@ -608,7 +688,7 @@ export type WatchlistItem = {
 };
 
 export async function fetchWatchlist(): Promise<{ items: WatchlistItem[]; watchlist_id: string | null }> {
-  const res = await fetch("/api/watchlist");
+  const res = await fetch("/api/watchlist", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`watchlist fetch failed: ${res.status}`);
   return res.json();
 }
@@ -616,15 +696,16 @@ export async function fetchWatchlist(): Promise<{ items: WatchlistItem[]; watchl
 export async function addToWatchlist(item_type: string, item_id: string): Promise<{ status: string }> {
   const res = await fetch("/api/watchlist/add", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ item_type, item_id }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`watchlist add failed: ${res.status}`);
   return res.json();
 }
 
 export async function removeFromWatchlist(itemId: string): Promise<{ status: string }> {
-  const res = await fetch(`/api/watchlist/remove/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+  const res = await fetch(`/api/watchlist/remove/${encodeURIComponent(itemId)}`, { method: "DELETE", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`watchlist remove failed: ${res.status}`);
   return res.json();
 }
@@ -643,7 +724,7 @@ export type AlertRule = {
 };
 
 export async function fetchAlertRules(): Promise<AlertRule[]> {
-  const res = await fetch("/api/alerts/rules");
+  const res = await fetch("/api/alerts/rules", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`alert rules fetch failed: ${res.status}`);
   return res.json();
 }
@@ -653,32 +734,33 @@ export async function createAlertRule(
 ): Promise<{ status: string; rule_id: string }> {
   const res = await fetch("/api/alerts/rules", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ rule_type, target_type, target_id, threshold }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`alert rule create failed: ${res.status}`);
   return res.json();
 }
 
 export async function deleteAlertRule(ruleId: string): Promise<{ status: string }> {
-  const res = await fetch(`/api/alerts/rules/${encodeURIComponent(ruleId)}`, { method: "DELETE" });
+  const res = await fetch(`/api/alerts/rules/${encodeURIComponent(ruleId)}`, { method: "DELETE", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`alert rule delete failed: ${res.status}`);
   return res.json();
 }
 
 export async function toggleAlertRule(ruleId: string): Promise<{ status: string; enabled: boolean }> {
-  const res = await fetch(`/api/alerts/rules/${encodeURIComponent(ruleId)}/toggle`, { method: "POST" });
+  const res = await fetch(`/api/alerts/rules/${encodeURIComponent(ruleId)}/toggle`, { method: "POST", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`alert rule toggle failed: ${res.status}`);
   return res.json();
 }
 
 export async function markAlertRead(notificationId: string): Promise<void> {
-  const res = await fetch(`/api/alerts/read/${encodeURIComponent(notificationId)}`, { method: "POST" });
+  const res = await fetch(`/api/alerts/read/${encodeURIComponent(notificationId)}`, { method: "POST", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`mark alert read failed: ${res.status}`);
 }
 
 export async function markAllAlertsRead(): Promise<void> {
-  const res = await fetch("/api/alerts/read-all", { method: "POST" });
+  const res = await fetch("/api/alerts/read-all", { method: "POST", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`mark all alerts read failed: ${res.status}`);
 }
 
@@ -687,50 +769,73 @@ export async function markAllAlertsRead(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function fetchNarrativeCoordination(narrativeId: string): Promise<CoordinationData & { narrative_id: string; flag_count: number }> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/coordination`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/coordination`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`coordination fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCoordinationSummary(): Promise<{ total_events: number; events_by_type: Record<string, number>; most_recent: CoordinationEvent | null }> {
-  const res = await fetch("/api/coordination/summary");
+  const res = await fetch("/api/coordination/summary", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`coordination summary failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCorrelationMatrix(leadDays = 1, limit = 20): Promise<{ pairs: CorrelationPair[]; generated_at: number; cached: boolean }> {
-  const res = await fetch(`/api/correlations/top?limit=${limit}&lead_days=${leadDays}`);
+  const res = await fetch(`/api/correlations/top?limit=${limit}&lead_days=${leadDays}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`correlation matrix failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchNarrativeCorrelations(narrativeId: string, leadDays = 1): Promise<CorrelationResult[]> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/correlations?lead_days=${leadDays}`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/correlations?lead_days=${leadDays}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative correlations failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchNarrativeSources(narrativeId: string): Promise<SourceBreakdown[]> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/sources`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/sources`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`sources fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchBufferStatus(): Promise<BufferStatus> {
-  const res = await fetch("/api/pipeline/buffer");
+  const res = await fetch("/api/pipeline/buffer", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`buffer status failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchNarrativeDocuments(narrativeId: string, limit = 10, offset = 0): Promise<{ items: Record<string, unknown>[]; total: number; limit: number; offset: number }> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/documents?limit=${limit}&offset=${offset}`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/documents?limit=${limit}&offset=${offset}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`documents fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchAlertCount(): Promise<{ unread: number }> {
-  const res = await fetch("/api/alerts/count");
+  const res = await fetch("/api/alerts/count", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) return { unread: 0 };
+  return res.json();
+}
+
+export type AlertNotification = {
+  id: string;
+  user_id: string;
+  rule_id: string | null;
+  title: string;
+  message: string;
+  link: string;
+  is_read: number;
+  created_at: string;
+};
+
+export async function fetchAlerts(unread_only = false): Promise<AlertNotification[]> {
+  const res = await fetch(`/api/alerts?unread_only=${unread_only}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`alerts fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchAlertTypes(): Promise<Record<string, string>> {
+  const res = await fetch("/api/alerts/types", { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) return {};
   return res.json();
 }
 
@@ -767,7 +872,7 @@ export type TimelineEntry = {
 };
 
 export async function fetchPortfolio(): Promise<{ portfolio: Record<string, unknown> | null; holdings: PortfolioHolding[] }> {
-  const res = await fetch("/api/portfolio");
+  const res = await fetch("/api/portfolio", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`portfolio fetch failed: ${res.status}`);
   return res.json();
 }
@@ -775,34 +880,111 @@ export async function fetchPortfolio(): Promise<{ portfolio: Record<string, unkn
 export async function addPortfolioHolding(ticker: string, shares = 0): Promise<{ status: string; holding_id?: string }> {
   const res = await fetch("/api/portfolio/holdings", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ ticker, shares }),
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`holding add failed: ${res.status}`);
   return res.json();
 }
 
 export async function removePortfolioHolding(holdingId: string): Promise<{ status: string }> {
-  const res = await fetch(`/api/portfolio/holdings/${encodeURIComponent(holdingId)}`, { method: "DELETE" });
+  const res = await fetch(`/api/portfolio/holdings/${encodeURIComponent(holdingId)}`, { method: "DELETE", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`holding remove failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchPortfolioExposure(): Promise<{ exposures: NarrativeExposure[] }> {
-  const res = await fetch("/api/portfolio/exposure");
+  const res = await fetch("/api/portfolio/exposure", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`exposure fetch failed: ${res.status}`);
   return res.json();
 }
 
+// Phase 6 — Portfolio Analytics types
+export type PortfolioSummary = {
+  total_value: number;
+  total_pnl: number;
+  day_change: number;
+  day_change_pct: number;
+  position_count: number;
+};
+
+export type AllocationGroup = {
+  group: string;
+  value: number;
+  pct: number;
+  pnl: number;
+  tickers: string[];
+};
+
+export type PerformancePoint = { date: string; value: number };
+
+export type PerformanceData = {
+  portfolio: PerformancePoint[];
+  benchmark: PerformancePoint[];
+  total_return_pct: number;
+  benchmark_return_pct: number;
+};
+
+export type CorrelationWarning = {
+  pair: [string, string];
+  correlation: number;
+  severity: "high" | "medium";
+};
+
+export type CorrelationMatrix = {
+  tickers: string[];
+  matrix: number[][];
+  warnings: CorrelationWarning[];
+};
+
+export type ConcentrationData = {
+  top3_pct: number;
+  top3_warning: boolean;
+  sector_hhi: number;
+  sector_concentrated: boolean;
+  single_stock_warnings: { ticker: string; pct: number }[];
+};
+
+export async function fetchPortfolioSummary(): Promise<PortfolioSummary> {
+  const res = await fetch("/api/portfolio/summary", { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`portfolio summary fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPortfolioAllocation(groupBy: "sector" | "asset_class" | "risk" = "sector"): Promise<AllocationGroup[]> {
+  const res = await fetch(`/api/portfolio/allocation?group_by=${groupBy}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`portfolio allocation fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPortfolioPerformance(days = 90, benchmark = "SPY"): Promise<PerformanceData> {
+  const res = await fetch(`/api/portfolio/performance?days=${days}&benchmark=${encodeURIComponent(benchmark)}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`portfolio performance fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPortfolioCorrelation(): Promise<CorrelationMatrix> {
+  const res = await fetch("/api/portfolio/correlation", { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`portfolio correlation fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPortfolioConcentration(): Promise<ConcentrationData> {
+  const res = await fetch("/api/portfolio/concentration", { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`portfolio concentration fetch failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchNarrativeTimeline(narrativeId: string, days = 30): Promise<{ narrative_id: string; timeline: TimelineEntry[] }> {
-  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/timeline?days=${days}`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/timeline?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`timeline fetch failed: ${res.status}`);
   return res.json();
 }
 
 export async function compareNarrativeSnapshots(narrativeId: string, date1: string, date2: string): Promise<Record<string, unknown>> {
   const params = new URLSearchParams({ date1, date2 });
-  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/compare?${params}`);
+  const res = await fetch(`/api/narratives/${encodeURIComponent(narrativeId)}/compare?${params}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`compare failed: ${res.status}`);
   return res.json();
 }
@@ -818,7 +1000,7 @@ export type EarningsEntry = {
 };
 
 export async function fetchUpcomingEarnings(days = 14): Promise<EarningsEntry[]> {
-  const res = await fetch(`/api/earnings/upcoming?days=${days}`);
+  const res = await fetch(`/api/earnings/upcoming?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) return [];
   return res.json();
 }
@@ -970,43 +1152,43 @@ export type AnalyticsContrarianResponse = {
 };
 
 export async function fetchMomentumLeaderboard(days = 7): Promise<{ generated_at: string; leaderboard: AnalyticsMomentumEntry[] }> {
-  const res = await fetch(`/api/analytics/momentum-leaderboard?days=${days}`);
+  const res = await fetch(`/api/analytics/momentum-leaderboard?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`momentum-leaderboard failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchNarrativeHistories(days = 30): Promise<AnalyticsHistoriesResponse> {
-  const res = await fetch(`/api/analytics/narrative-histories?days=${days}`);
+  const res = await fetch(`/api/analytics/narrative-histories?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative-histories failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchNarrativeOverlap(days = 30): Promise<AnalyticsOverlapResponse> {
-  const res = await fetch(`/api/analytics/narrative-overlap?days=${days}`);
+  const res = await fetch(`/api/analytics/narrative-overlap?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`narrative-overlap failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchSectorConvergence(days = 30): Promise<AnalyticsSectorResponse> {
-  const res = await fetch(`/api/analytics/sector-convergence?days=${days}`);
+  const res = await fetch(`/api/analytics/sector-convergence?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`sector-convergence failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchLifecycleFunnel(days = 30): Promise<AnalyticsFunnelResponse> {
-  const res = await fetch(`/api/analytics/lifecycle-funnel?days=${days}`);
+  const res = await fetch(`/api/analytics/lifecycle-funnel?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`lifecycle-funnel failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchLeadTimeDistribution(days = 90, threshold = 2.0): Promise<AnalyticsLeadTimeResponse> {
-  const res = await fetch(`/api/analytics/lead-time-distribution?days=${days}&threshold=${threshold}`);
+  const res = await fetch(`/api/analytics/lead-time-distribution?days=${days}&threshold=${threshold}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`lead-time-distribution failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchContrarianSignals(days = 30): Promise<AnalyticsContrarianResponse> {
-  const res = await fetch(`/api/analytics/contrarian-signals?days=${days}`);
+  const res = await fetch(`/api/analytics/contrarian-signals?days=${days}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error(`contrarian-signals failed: ${res.status}`);
   return res.json();
 }
@@ -1031,8 +1213,105 @@ export async function analyzeNarrative(
 ): Promise<DeepAnalysis> {
   const res = await fetch(
     `/api/narratives/${encodeURIComponent(narrativeId)}/analyze${force ? "?force=true" : ""}`,
-    { method: "POST" }
+    { method: "POST", headers: authHeaders(), credentials: "include" }
   );
   if (!res.ok) throw new Error(`analyze failed: ${res.status}`);
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Part C — Social Sentiment System
+// ---------------------------------------------------------------------------
+
+export type TickerSentiment = {
+  ticker: string;
+  composite_score: number;
+  news_component: number;
+  social_component: number;
+  momentum_component: number;
+  message_volume_24h: number;
+  sources: {
+    stocktwits?: {
+      symbol: string;
+      total_messages: number;
+      bullish_count: number;
+      bearish_count: number;
+      neutral_count: number;
+      sentiment_score: number;
+      volume_24h: number;
+      trending: boolean;
+      fetched_at: string;
+    } | null;
+    narrative_signals?: { news_component: number } | null;
+  };
+  spike_detected: boolean;
+  computed_at: string | null;
+};
+
+export type MarketSentiment = {
+  market_score: number;
+  bullish_pct: number;
+  bearish_pct: number;
+  neutral_pct: number;
+  top_bullish: { ticker: string; score: number }[];
+  top_bearish: { ticker: string; score: number }[];
+  spikes: { ticker: string; score: number; direction: string }[];
+};
+
+export type SentimentRecord = {
+  id: number;
+  ticker: string;
+  composite_score: number;
+  news_component: number;
+  social_component: number;
+  momentum_component: number;
+  message_volume: number;
+  recorded_at: string;
+};
+
+export type TrendingTicker = {
+  ticker: string;
+  total_mentions: number;
+  total_bullish: number;
+  total_bearish: number;
+};
+
+export async function fetchMarketSentiment(): Promise<MarketSentiment> {
+  const res = await fetch("/api/sentiment/market", { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`market sentiment fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTickerSentiment(ticker: string): Promise<TickerSentiment> {
+  const res = await fetch(`/api/sentiment/${encodeURIComponent(ticker)}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`ticker sentiment fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSentimentHistory(
+  ticker: string,
+  hours: number = 168
+): Promise<{ ticker: string; hours: number; data: SentimentRecord[] }> {
+  const res = await fetch(`/api/sentiment/${encodeURIComponent(ticker)}/history?hours=${hours}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`sentiment history fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTrendingTickers(
+  hours: number = 24,
+  limit: number = 10
+): Promise<{ hours: number; tickers: TrendingTicker[] }> {
+  const res = await fetch(`/api/social/trending?hours=${hours}&limit=${limit}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`trending tickers fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSocialDetail(ticker: string): Promise<{
+  ticker: string;
+  stocktwits: TickerSentiment["sources"]["stocktwits"];
+  narrative_signals: { count: number; signals: unknown[] } | null;
+}> {
+  const res = await fetch(`/api/social/${encodeURIComponent(ticker)}`, { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`social detail fetch failed: ${res.status}`);
   return res.json();
 }

@@ -184,5 +184,5 @@ class CoinGeckoAdapter:
                 delay="realtime",
             )
         except Exception as e:
-            logger.warning("CoinGecko fetch failed for %s: %s", symbol, e)
+            logger.warning("CoinGecko fetch failed for %s: %s", symbol, type(e).__name__)
             return None

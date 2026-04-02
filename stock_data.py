@@ -22,9 +22,11 @@ _PRICE_HISTORY_TTL = 3600  # 1 hour
 _MAX_CACHE_SIZE = 500
 
 
-def get_price_history(symbol: str, days: int = 30) -> list:
-    """Returns daily closing prices from yfinance, cached for 1 hour."""
-    cache_key = f"{symbol}:{days}"
+def get_price_history(symbol: str, days: int = 30, interval: str = "1d") -> list:
+    """Returns OHLCV price history from yfinance, cached for 1 hour."""
+    _VALID_INTERVALS = {"1d", "5d", "1wk", "1mo"}
+    yf_interval = interval if interval in _VALID_INTERVALS else "1d"
+    cache_key = f"{symbol}:{days}:{yf_interval}"
     now = time.time()
     if cache_key in _price_history_cache:
         ts, data = _price_history_cache[cache_key]
@@ -33,17 +35,26 @@ def get_price_history(symbol: str, days: int = 30) -> list:
 
     try:
         ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=f"{days}d")
+        hist = ticker.history(period=f"{days}d", interval=yf_interval)
         result = []
+        prev_close: float | None = None
         for date, row in hist.iterrows():
             close = float(row["Close"])
             open_price = float(row.get("Open", close))
-            change_pct = ((close - open_price) / open_price * 100) if open_price else 0.0
+            high = float(row.get("High", close))
+            low = float(row.get("Low", close))
+            volume = int(row.get("Volume", 0))
+            change_pct = ((close - prev_close) / prev_close * 100) if prev_close else 0.0
             result.append({
                 "date": date.strftime("%Y-%m-%d"),
+                "open": round(open_price, 2),
+                "high": round(high, 2),
+                "low": round(low, 2),
                 "close": round(close, 2),
+                "volume": volume,
                 "change_pct": round(change_pct, 2),
             })
+            prev_close = close
         _price_history_cache[cache_key] = (now, result)
         if len(_price_history_cache) > _MAX_CACHE_SIZE:
             oldest_key = min(_price_history_cache, key=lambda k: _price_history_cache[k][0])

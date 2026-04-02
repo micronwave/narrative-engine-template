@@ -9,24 +9,33 @@ completely independent. Both read from the same SQLite DB.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import random
 import re
+import secrets
+import stat
 import sys
 import threading
+import time as _time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-import logging as _logging
+import functools
+import inspect
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-from fastapi import Depends, FastAPI, HTTPException, Header, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Header, Path as FPath, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
-logger = _logging.getLogger(__name__)
+from starlette.responses import RedirectResponse
 
 try:
     from sse_starlette.sse import EventSourceResponse
@@ -62,6 +71,8 @@ from coingecko_adapter import CoinGeckoAdapter  # noqa: E402
 from websocket_relay import FinnhubWebSocketRelay  # noqa: E402
 from notifications import NotificationManager, RULE_TYPES  # noqa: E402
 from sector_map import SECTOR_MAP  # noqa: E402
+from stocktwits_adapter import StockTwitsAdapter  # noqa: E402
+from sentiment_aggregator import SentimentAggregator  # noqa: E402
 
 # Load .env into os.environ before reading env vars at module level
 from dotenv import load_dotenv as _load_dotenv
@@ -73,21 +84,27 @@ finnhub = FinnhubService(
 )
 
 # Phase 2: Data normalization layer — adapter chain
+# Note: we parse ENABLE flags with the same truthiness rules as Pydantic bool
+# coercion (1/true/yes/on) to stay in sync with settings.py definitions,
+# but we read os.environ directly because importing Settings requires
+# ANTHROPIC_API_KEY which would break the test suite.
 _finnhub_adapter = FinnhubAdapter(finnhub)
-_twelve_data_adapter = TwelveDataAdapter(
-    api_key=os.environ.get("TWELVE_DATA_API_KEY", "")
-)
-_coingecko_adapter = CoinGeckoAdapter(
-    api_key=os.environ.get("COINGECKO_API_KEY", "")
-)
-
 _data_adapters = [_finnhub_adapter]
-if os.environ.get("ENABLE_TWELVE_DATA", "").lower() == "true":
-    _data_adapters.append(_twelve_data_adapter)
-if os.environ.get("ENABLE_COINGECKO", "").lower() == "true":
-    _data_adapters.append(_coingecko_adapter)
+if os.environ.get("ENABLE_TWELVE_DATA", "").lower() in ("1", "true", "yes", "on"):
+    _data_adapters.append(TwelveDataAdapter(
+        api_key=os.environ.get("TWELVE_DATA_API_KEY", "")
+    ))
+if os.environ.get("ENABLE_COINGECKO", "").lower() in ("1", "true", "yes", "on"):
+    _data_adapters.append(CoinGeckoAdapter(
+        api_key=os.environ.get("COINGECKO_API_KEY", "")
+    ))
 
 data_normalizer = DataNormalizer(adapters=_data_adapters)
+
+# Part C: Social sentiment instances (SentimentAggregator initialized at startup
+# once repo is available — set to None until then)
+_stocktwits_adapter = StockTwitsAdapter()
+_sentiment_aggregator: "SentimentAggregator | None" = None
 
 # Phase 2 Batch 4: WebSocket relay instance (None until startup if API key set)
 _ws_relay: FinnhubWebSocketRelay | None = None
@@ -99,12 +116,44 @@ DB_PATH = str(Path(__file__).parent.parent / "data" / "narrative_engine.db")
 # Auth mode: "stub" (single-user MVP) or "jwt" (multi-user)
 _AUTH_MODE = os.environ.get("AUTH_MODE", "stub")
 
+# Environment: "development" or "production" — controls HSTS + HTTPS redirect
+_ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
 # ---------------------------------------------------------------------------
 # Audit: shared-state lock, input validators, CSV sanitizer
 # ---------------------------------------------------------------------------
 _securities_lock = threading.Lock()
 
+# C6: SSE connection tracking (asyncio.Lock since SSE endpoint is async def)
+_sse_connections: int = 0
+_sse_per_user: dict[str, int] = {}
+_sse_lock: asyncio.Lock | None = None  # initialized in startup hook
+_SSE_MAX_GLOBAL = 100
+_SSE_MAX_PER_USER = 5
+_latest_ticker_payload: dict = {"type": "ticker-update", "items": []}
+
+# M10: Brute-force protection for login
+_login_attempts: dict[str, list[float]] = {}  # email -> [timestamps]
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECONDS = 900  # 15 minutes
+
 _SYMBOL_RE = re.compile(r'^(?=.*[A-Z0-9])[A-Z0-9.\-]{1,12}$')
+
+# H7: Cookie security — Secure flag only in production (HTTPS)
+_IS_SECURE_ENV = os.environ.get("ENVIRONMENT", "").lower() == "production"
+
+# M9 / H7: IP extraction helper (respects X-Forwarded-For behind proxy)
+def _extract_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# H7: CSRF token generation helper
+def _generate_csrf_token() -> str:
+    """Generate a random CSRF token."""
+    return secrets.token_hex(32)
 
 
 def _validate_symbol(symbol: str) -> str:
@@ -139,17 +188,13 @@ def _get_jwt_secret() -> str:
     """Return JWT secret or raise 500 if not properly configured."""
     secret = os.environ.get("JWT_SECRET_KEY", "")
     if not secret or len(secret) < 32:
-        raise HTTPException(status_code=500, detail="Server authentication misconfigured")
+        raise HTTPException(status_code=500, detail="JWT_SECRET_KEY must be at least 32 characters")
     return secret
-
-# ===========================================================================
-# EXAMPLE DATA — Replace these with your own asset universe.
-# These stubs demonstrate the data shape the frontend expects.
-# ===========================================================================
 
 # ---------------------------------------------------------------------------
 # D1 — Asset Class Association Model (in-memory stubs)
 # ---------------------------------------------------------------------------
+# Example stub data — replace with your own
 ASSET_CLASSES = [
     {"id": "ac-001", "name": "Semiconductors", "type": "sector",
      "description": "Companies involved in chip design, fabrication, and equipment"},
@@ -167,6 +212,7 @@ ASSET_CLASSES = [
      "description": "Heavy industry, manufacturing, aerospace, and defense contractors"},
 ]
 
+# Example stub data — replace with your own
 TRACKED_SECURITIES = [
     # Semiconductors (ac-001)
     {"id": "ts-001", "symbol": "TSM", "name": "Taiwan Semiconductor Manufacturing",
@@ -228,6 +274,7 @@ TRACKED_SECURITIES = [
      "current_price": None, "price_change_24h": None, "narrative_impact_score": 0},
 ]
 
+# Example stub data — replace with your own
 # NarrativeAssets: placeholder narrative IDs replaced at startup with real DB IDs.
 NARRATIVE_ASSETS = [
     {"id": "na-001", "narrative_id": "nar-001", "asset_class_id": "ac-001",
@@ -290,6 +337,7 @@ def _build_narrative_assets(narrative_id: str) -> list:
 # ---------------------------------------------------------------------------
 # D4 — Manipulation/Coordination Detection Model (in-memory stubs)
 # ---------------------------------------------------------------------------
+# Example stub data — replace with your own
 MANIPULATION_INDICATORS = [
     {
         "id": "mi-001",
@@ -371,12 +419,7 @@ _subscription: dict = {
     "subscribed": False,
 }
 
-import secrets as _secrets
-STUB_AUTH_TOKEN = os.environ.get("STUB_AUTH_TOKEN", "")
-if not STUB_AUTH_TOKEN:
-    STUB_AUTH_TOKEN = _secrets.token_urlsafe(32)
-    print(f"[Auth] Generated stub token: {STUB_AUTH_TOKEN}")
-    print("[Auth] Set STUB_AUTH_TOKEN in .env to persist across restarts")
+STUB_AUTH_TOKEN = "stub-auth-token"
 
 app = FastAPI(title="Narrative Intelligence API", version="0.2.0")
 
@@ -385,8 +428,88 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _cors_raw.split(",")],
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "X-Auth-Token", "Authorization"],
+    allow_headers=["Content-Type", "x-auth-token", "Authorization"],  # FUTURE: drop x-auth-token after cookie migration (H7)
 )
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """M1: HSTS header + HTTP→HTTPS redirect in production."""
+    if _ENVIRONMENT == "production":
+        if request.headers.get("x-forwarded-proto") == "http":
+            https_url = request.url.replace(scheme="https")
+            return RedirectResponse(url=str(https_url), status_code=301)
+    response = await call_next(request)
+    if _ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=3600; includeSubDomains"
+        )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Shared thread-pool executors (C3 — avoid per-request overhead / thread explosion)
+# ---------------------------------------------------------------------------
+_BG_EXECUTOR = ThreadPoolExecutor(max_workers=5)
+_REQUEST_EXECUTOR = ThreadPoolExecutor(max_workers=10)
+
+_REQUEST_TIMEOUT_SECONDS = 30.0
+
+
+def _timeout(timeout: float = _REQUEST_TIMEOUT_SECONDS):
+    """Decorator: wraps a sync endpoint in run_in_executor with a wall-clock timeout.
+
+    Place BELOW @app.get and @limiter.limit decorators. The endpoint body runs
+    in the default executor (not _REQUEST_EXECUTOR) to avoid deadlocks when it
+    internally submits to _REQUEST_EXECUTOR. Returns 504 on timeout.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            loop = asyncio.get_running_loop()
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, functools.partial(fn, *args, **kwargs)
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504, detail="Computation timed out"
+                )
+        # Preserve original signature so FastAPI resolves query params + slowapi
+        # finds the Request parameter correctly.
+        wrapper.__signature__ = inspect.signature(fn)
+        return wrapper
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter (C2 — tiered IP-based rate limiting via slowapi)
+# ---------------------------------------------------------------------------
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["100/minute"],
+    enabled=os.environ.get("RATE_LIMIT_ENABLED", "1") != "0",
+)
+app.state.limiter = limiter
+
+
+async def _custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Return 429 with Retry-After header."""
+    from starlette.responses import JSONResponse
+    # All current limits are per-minute (60s window). If hourly/daily limits
+    # are added, extract dynamically from request.state.view_rate_limit.
+    retry_after = 60
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded: {exc.detail}"},
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +533,7 @@ async def _init_narrative_asset_ids():
             if na["narrative_id"] in id_map:
                 na["narrative_id"] = id_map[na["narrative_id"]]
     except Exception as e:
-        logger.warning("Could not initialize narrative IDs from DB: %s", e)
+        print(f"[D1] Warning: could not initialize narrative IDs from DB: {e}")
 
 
 _DYNAMIC_SECURITIES: dict[str, dict] = {}
@@ -426,12 +549,21 @@ async def start_price_refresh():
     global _DYNAMIC_SECURITIES
     _DYNAMIC_SECURITIES = _discover_linked_tickers()
     if _DYNAMIC_SECURITIES:
-        logger.info("Discovered %d dynamic tickers", len(_DYNAMIC_SECURITIES))
+        print(f"[Startup] Discovered {len(_DYNAMIC_SECURITIES)} dynamic tickers: "
+              f"{list(_DYNAMIC_SECURITIES.keys())[:10]}...")
 
     if finnhub.is_enabled():
         asyncio.create_task(_price_refresh_loop())
     else:
-        logger.info("Finnhub API key not set — price refresh disabled")
+        print("[Finnhub] API key not set — price refresh disabled")
+
+    # Finding 8: warn when ingester flags are on but keys are missing
+    if os.environ.get("ENABLE_MARKETAUX", "true").lower() not in ("false", "0") \
+            and not os.environ.get("MARKETAUX_API_KEY", ""):
+        logger.info("MarketAux enabled but MARKETAUX_API_KEY not set — ingester will be inactive")
+    if os.environ.get("ENABLE_NEWSDATA", "true").lower() not in ("false", "0") \
+            and not os.environ.get("NEWSDATA_API_KEY", ""):
+        logger.info("NewsData enabled but NEWSDATA_API_KEY not set — ingester will be inactive")
 
 # Crypto symbol mapping for Finnhub (moved to module level to avoid per-cycle recreation)
 _CRYPTO_MAP = {
@@ -634,6 +766,7 @@ async def _price_refresh_loop():
                             if nq is None:
                                 return
                             sec["current_price"] = nq.price
+                            sec["source"] = nq.source
                             if nq.close and nq.close != 0:
                                 sec["price_change_24h"] = round(
                                     (nq.price - nq.close) / nq.close * 100, 2
@@ -650,9 +783,9 @@ async def _price_refresh_loop():
                             if nq:
                                 _apply_normalized(sec, nq)
                     except Exception as e:
-                        logger.error("DataNormalizer fallback refresh error: %s", e)
+                        print(f"[DataNormalizer] Fallback refresh error: {e}")
         except Exception as e:
-            logger.error("Price refresh error: %s", e)
+            print(f"[Finnhub] Price refresh error: {e}")
         await asyncio.sleep(interval)
 
 
@@ -785,7 +918,7 @@ async def _impact_score_loop():
             for sec in TRACKED_SECURITIES:
                 sec["narrative_impact_score"] = scores.get(sec["id"], 0)
         except Exception as e:
-            logger.error("Impact score refresh error: %s", e)
+            print(f"[D3] Impact score refresh error: {e}")
         await asyncio.sleep(interval)
 
 
@@ -823,7 +956,7 @@ async def start_websocket_relay():
     global _ws_relay
     api_key = os.environ.get("FINNHUB_API_KEY", "")
     if not api_key:
-        logger.info("WS Relay: API key not set — WebSocket relay disabled")
+        print("[WS Relay] API key not set — WebSocket relay disabled")
         return
 
     symbols_limit = int(os.environ.get("WEBSOCKET_SYMBOLS_LIMIT", "50"))
@@ -847,6 +980,141 @@ async def start_websocket_relay():
     print(f"[WS Relay] Started — subscribing to up to {symbols_limit} symbols")
 
 
+@app.on_event("startup")
+async def _init_sse():
+    global _sse_lock
+    _sse_lock = asyncio.Lock()
+    asyncio.create_task(_sse_broadcast_loop())
+
+
+async def _sse_broadcast_loop():
+    """Single background task updates shared ticker payload every 8s."""
+    global _latest_ticker_payload
+    while True:
+        try:
+            _latest_ticker_payload = {"type": "ticker-update", "items": _ticker_payload()}
+        except Exception:
+            pass  # stale payload is better than crash
+        await asyncio.sleep(8)
+
+
+@app.on_event("startup")
+async def _init_login_cleanup():
+    asyncio.create_task(_cleanup_login_attempts())
+
+
+async def _cleanup_login_attempts():
+    """Periodically purge stale login attempt records every 5 minutes."""
+    while True:
+        await asyncio.sleep(300)
+        now = _time.time()
+        stale = [e for e, ts in _login_attempts.items()
+                 if all(now - t >= _LOGIN_WINDOW_SECONDS for t in ts)]
+        for e in stale:
+            _login_attempts.pop(e, None)
+
+
+@app.on_event("startup")
+async def start_sentiment_refresh():
+    """Start background sentiment aggregation loop (Part C)."""
+    global _sentiment_aggregator
+    repo = get_repo()
+    if repo is not None:
+        _sentiment_aggregator = SentimentAggregator(repo, _stocktwits_adapter, finnhub)
+    asyncio.create_task(_sentiment_refresh_loop())
+
+
+@app.on_event("startup")
+async def start_alert_engine():
+    """Run alert rule evaluation every 30 seconds."""
+    async def _alert_loop():
+        while True:
+            try:
+                repo = get_repo()
+                if repo is not None:
+                    securities = {s["symbol"]: s for s in TRACKED_SECURITIES}
+                    nm = NotificationManager(repo)
+                    nm.check_rules(securities=securities)
+            except Exception as e:
+                print(f"[AlertEngine] Error: {e}")
+            await asyncio.sleep(30)
+    asyncio.create_task(_alert_loop())
+
+
+@app.on_event("startup")
+async def _check_db_permissions():
+    db_path = Path(DB_PATH)
+    if db_path.exists() and os.name != "nt":  # Skip on Windows
+        current = stat.S_IMODE(db_path.stat().st_mode)
+        if current & (stat.S_IRGRP | stat.S_IROTH):
+            logger.warning(
+                "Database file %s is world/group-readable (mode %o). Setting to 600.",
+                DB_PATH,
+                current,
+            )
+            os.chmod(str(db_path), stat.S_IRUSR | stat.S_IWUSR)
+
+
+@app.on_event("startup")
+async def _init_data_normalizer_repo():
+    """Wire repository into DataNormalizer for price API usage tracking."""
+    repo = get_repo()
+    if repo is not None:
+        data_normalizer._repository = repo
+
+
+async def _sentiment_refresh_loop():
+    """
+    Background task: fetch social sentiment and store composite scores.
+
+    - Every 15 min: fetch StockTwits data for tracked securities, store social mentions
+    - Every 60 min: compute and store composite sentiment for all tracked tickers
+    """
+    global _sentiment_aggregator
+    social_interval = int(os.environ.get("SENTIMENT_SOCIAL_REFRESH_SECONDS", "900"))   # 15 min
+    composite_interval = int(os.environ.get("SENTIMENT_COMPOSITE_REFRESH_SECONDS", "3600"))  # 60 min
+    last_composite = 0.0
+
+    while True:
+        repo = get_repo()
+        if repo is not None and _sentiment_aggregator is None:
+            _sentiment_aggregator = SentimentAggregator(repo, _stocktwits_adapter, finnhub)
+
+        if repo is not None and _sentiment_aggregator is not None:
+            tickers = [s["symbol"] for s in TRACKED_SECURITIES]
+            try:
+                # Social mentions pass
+                for ticker in tickers:
+                    data = _stocktwits_adapter.get_sentiment(ticker)
+                    if data:
+                        repo.insert_social_mention(ticker, "stocktwits", {
+                            "mention_count": data.get("total_messages", 0),
+                            "bullish_count": data.get("bullish_count", 0),
+                            "bearish_count": data.get("bearish_count", 0),
+                        })
+            except Exception as e:
+                print(f"[Sentiment] Social mentions refresh error: {e}")
+
+            now_ts = _time.time()
+            if now_ts - last_composite >= composite_interval:
+                try:
+                    for ticker in tickers:
+                        result = _sentiment_aggregator.compute_ticker_sentiment(ticker)
+                        repo.insert_sentiment_record(ticker, result)
+                    last_composite = _time.time()
+                except Exception as e:
+                    print(f"[Sentiment] Composite refresh error: {e}")
+
+        await asyncio.sleep(social_interval)
+
+
+@app.on_event("shutdown")
+async def _shutdown_executors():
+    """Cleanly shut down shared thread-pool executors."""
+    _BG_EXECUTOR.shutdown(wait=False)
+    _REQUEST_EXECUTOR.shutdown(wait=False)
+
+
 async def _tick_flush_loop():
     """Flush buffered WebSocket ticks to price_ticks table periodically."""
     flush_interval = int(os.environ.get("WEBSOCKET_FLUSH_INTERVAL_SECONDS", "5"))
@@ -863,7 +1131,7 @@ async def _tick_flush_loop():
                         if count > 0:
                             print(f"[Tick Flush] Wrote {count} ticks to DB")
         except Exception as e:
-            logger.error("Tick flush error: %s", e)
+            print(f"[Tick Flush] Error: {e}")
         await asyncio.sleep(flush_interval)
 
 
@@ -882,12 +1150,12 @@ async def _tick_retention_loop():
                 candles = repo.aggregate_candles_1m(cutoff)
                 pruned = repo.prune_old_ticks(cutoff)
                 if candles > 0 or pruned > 0:
-                    logger.info(
-                        "Tick retention: aggregated %d candles, pruned %d ticks (cutoff: %dh)",
-                        candles, pruned, retention_hours,
+                    print(
+                        f"[Tick Retention] Aggregated {candles} candles, "
+                        f"pruned {pruned} ticks (cutoff: {retention_hours}h)"
                     )
         except Exception as e:
-            logger.error("Tick retention error: %s", e)
+            print(f"[Tick Retention] Error: {e}")
         await asyncio.sleep(3600)  # Every hour
 
 
@@ -897,8 +1165,6 @@ async def _analytics_bg_loop():
     Both require yfinance price lookups. Single loop avoids double-fetching.
     Runs every ANALYTICS_BG_REFRESH_SECONDS (default 4h).
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     interval = int(os.environ.get("ANALYTICS_BG_REFRESH_SECONDS", "14400"))
     await asyncio.sleep(60)  # Let price refresh populate first
 
@@ -922,30 +1188,30 @@ async def _analytics_bg_loop():
                     if t and not t.startswith("TOPIC:"):
                         all_tickers.add(t.upper())
 
-            # Fetch price histories in parallel (5 workers, 15s timeout)
+            # Fetch price histories in parallel (shared BG executor, 15s timeout)
             price_data: dict[str, list] = {}
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = {
-                    executor.submit(_yf_price_history, t, 90): t
-                    for t in all_tickers
-                }
-                for future in futures:
-                    ticker = futures[future]
-                    try:
-                        data = future.result(timeout=15)
-                        if data:
-                            price_data[ticker] = data
-                    except Exception:
-                        pass
+            futures = {
+                _BG_EXECUTOR.submit(_yf_price_history, t, 90): t
+                for t in all_tickers
+            }
+            for future in futures:
+                ticker = futures[future]
+                try:
+                    data = future.result(timeout=15)
+                    if data:
+                        price_data[ticker] = data
+                except Exception:
+                    pass
 
             _compute_lead_time_cache(all_narratives, first_dates, price_data)
             _compute_contrarian_cache(repo, all_narratives, price_data)
-            logger.info(
-                "Analytics BG refreshed: %d tickers, %d thresholds, %d contrarian signals",
-                len(price_data), len(_lead_time_cache), len(_contrarian_cache.get("signals", []))
+            print(
+                f"[Analytics BG] Refreshed — {len(price_data)} tickers, "
+                f"{len(_lead_time_cache)} thresholds, "
+                f"{len(_contrarian_cache.get('signals', []))} contrarian signals"
             )
         except Exception as e:
-            logger.error("Analytics background refresh error: %s", e)
+            print(f"[Analytics BG] Error: {e}")
         await asyncio.sleep(interval)
 
 
@@ -1226,37 +1492,107 @@ def _decode_jwt(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=403, detail="Invalid authentication token")
+
+    # Blacklist check — FAIL-CLOSED: if DB is unavailable, reject the token
+    jti = payload.get("jti")
+    if jti:
+        repo = get_repo()
+        if repo is None:
+            raise HTTPException(status_code=503, detail="Database unavailable — cannot verify token")
+        if repo.is_token_blacklisted(jti):
+            raise HTTPException(status_code=401, detail="Token has been revoked")
+
     return payload
 
 
-def get_current_user(x_auth_token: Optional[str] = Header(None)) -> dict:
+def get_current_user(request: Request, x_auth_token: Optional[str] = Header(None)) -> dict:
     """FastAPI dependency returning a user dict.
     AUTH_MODE=stub: validates STUB_AUTH_TOKEN, returns local user.
-    AUTH_MODE=jwt: decodes JWT, returns user dict with real user_id."""
-    if x_auth_token is None:
+    AUTH_MODE=jwt: decodes JWT, returns user dict with real user_id.
+    H7: Falls back to auth_token cookie if no header present."""
+    # H7: Try header first, then cookie
+    token = x_auth_token or request.cookies.get("auth_token")
+    if token is None:
         raise HTTPException(status_code=403, detail="Authentication required")
     if _AUTH_MODE == "stub":
-        if x_auth_token != STUB_AUTH_TOKEN:
+        if token != STUB_AUTH_TOKEN:
             raise HTTPException(status_code=403, detail="Invalid authentication token")
         return {"user_id": "local", "role": "user"}
-    # JWT mode
-    payload = _decode_jwt(x_auth_token)
-    return {"user_id": payload["sub"], "role": payload.get("role", "user")}
+    # JWT mode — M9: log token validation failures from caller
+    try:
+        payload = _decode_jwt(token)
+    except HTTPException as e:
+        try:
+            repo = get_repo()
+            if repo:
+                repo.log_auth_event({
+                    "event_type": "token_validation_failure",
+                    "ip_address": _extract_ip(request),
+                    "user_agent": request.headers.get("user-agent"),
+                    "success": False,
+                    "details": e.detail,
+                })
+        except Exception:
+            pass
+        raise
+    return {
+        "user_id": payload["sub"],
+        "role": payload.get("role", "user"),
+        "jti": payload.get("jti"),
+        "exp": payload.get("exp"),
+    }
 
 
-def get_optional_user(x_auth_token: Optional[str] = Header(None)) -> dict:
+def get_optional_user(request: Request, x_auth_token: Optional[str] = Header(None)) -> dict:
     """FastAPI dependency for endpoints that work without auth in single-user mode.
     AUTH_MODE=stub: no token = local user, bad token = 403.
-    AUTH_MODE=jwt: token required, no anonymous access."""
+    AUTH_MODE=jwt: token required, no anonymous access.
+    H7: Falls back to auth_token cookie if no header present."""
+    # H7: Try header first, then cookie
+    token = x_auth_token or request.cookies.get("auth_token")
     if _AUTH_MODE == "stub":
-        if x_auth_token and x_auth_token != STUB_AUTH_TOKEN:
+        if token and token != STUB_AUTH_TOKEN:
             raise HTTPException(status_code=403, detail="Invalid authentication token")
         return {"user_id": "local", "role": "user"}
     # JWT mode — token is required
-    if x_auth_token is None:
+    if token is None:
         raise HTTPException(status_code=403, detail="Authentication required")
-    payload = _decode_jwt(x_auth_token)
-    return {"user_id": payload["sub"], "role": payload.get("role", "user")}
+    # M9: log token validation failures from caller
+    try:
+        payload = _decode_jwt(token)
+    except HTTPException as e:
+        try:
+            repo = get_repo()
+            if repo:
+                repo.log_auth_event({
+                    "event_type": "token_validation_failure",
+                    "ip_address": _extract_ip(request),
+                    "user_agent": request.headers.get("user-agent"),
+                    "success": False,
+                    "details": e.detail,
+                })
+        except Exception:
+            pass
+        raise
+    return {
+        "user_id": payload["sub"],
+        "role": payload.get("role", "user"),
+        "jti": payload.get("jti"),
+        "exp": payload.get("exp"),
+    }
+
+
+# L3: RBAC — factory that returns a FastAPI dependency checking user role
+def require_role(required_role: str):
+    """Factory: returns a FastAPI dependency that checks user role."""
+    def _check(user: dict = Depends(get_current_user)) -> dict:
+        if user.get("role") != required_role:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Requires role: {required_role}",
+            )
+        return user
+    return _check
 
 
 # ---------------------------------------------------------------------------
@@ -1272,8 +1608,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 @app.post("/api/auth/signup")
-def auth_signup(body: SignupRequest):
+@limiter.limit("5/minute")
+def auth_signup(request: Request, body: SignupRequest):
     """Create a new user account. Only active in JWT mode."""
     if _AUTH_MODE != "jwt":
         raise HTTPException(status_code=404, detail="Auth endpoints require AUTH_MODE=jwt")
@@ -1294,12 +1635,12 @@ def auth_signup(body: SignupRequest):
     if not body.password or len(body.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
-    # NOTE: bcrypt silently truncates passwords longer than 72 bytes.
-    # For most user passwords this is not an issue.
-    password_hash = bcrypt.hashpw(
-        body.password.encode("utf-8"),
-        bcrypt.gensalt(),
-    ).decode("utf-8")
+    # L1: Pre-hash with SHA-256 to handle passwords > 72 bytes (bcrypt truncates at 72)
+    pw_bytes = hashlib.sha256(body.password.encode("utf-8")).digest()
+    password_hash = bcrypt.hashpw(pw_bytes, bcrypt.gensalt()).decode("utf-8")
+
+    # L2: Generate email verification token
+    verification_token = secrets.token_urlsafe(32)
 
     user_id = str(uuid.uuid4())
     now_ts = datetime.now(timezone.utc)
@@ -1308,6 +1649,8 @@ def auth_signup(body: SignupRequest):
             "id": user_id,
             "email": email,
             "password_hash": password_hash,
+            "email_verified": 0,
+            "verification_token": verification_token,
             "created_at": now_ts.isoformat(),
         })
     except Exception as e:
@@ -1315,9 +1658,26 @@ def auth_signup(body: SignupRequest):
             raise HTTPException(status_code=409, detail="Email already registered")
         raise
 
+    # L2: Log verification URL (email sending deferred — no SMTP/SES configured yet)
+    logger.info("[Auth] Verification token for %s: /api/auth/verify?token=%s", email, verification_token)
+
+    # M9: Log signup event
+    try:
+        repo.log_auth_event({
+            "event_type": "signup",
+            "email": email,
+            "user_id": user_id,
+            "ip_address": _extract_ip(request),
+            "user_agent": request.headers.get("user-agent"),
+            "success": True,
+        })
+    except Exception:
+        pass  # Non-fatal — never block signup for audit logging failure
+
     secret = _get_jwt_secret()
-    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))
+    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "2"))
     payload = {
+        "jti": str(uuid.uuid4()),
         "sub": user_id,
         "email": email,
         "role": "user",
@@ -1325,11 +1685,47 @@ def auth_signup(body: SignupRequest):
         "exp": now_ts + timedelta(hours=expiry_hours),
     }
     token = pyjwt.encode(payload, secret, algorithm="HS256")
-    return {"user_id": user_id, "email": email, "token": token}
+
+    # M2: Generate refresh token
+    refresh_jti = str(uuid.uuid4())
+    refresh_payload = {
+        "jti": refresh_jti,
+        "sub": user_id,
+        "type": "refresh",
+        "iat": now_ts,
+        "exp": now_ts + timedelta(days=7),
+    }
+    refresh_token = pyjwt.encode(refresh_payload, secret, algorithm="HS256")
+    repo.store_refresh_token(refresh_jti, user_id, (now_ts + timedelta(days=7)).isoformat())
+
+    # H7: Set HttpOnly cookie + CSRF cookie
+    from starlette.responses import JSONResponse
+    response = JSONResponse({"user_id": user_id, "email": email, "token": token, "refresh_token": refresh_token})
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=_IS_SECURE_ENV,
+        samesite="strict",
+        path="/api",
+        max_age=expiry_hours * 3600,
+    )
+    csrf_token = _generate_csrf_token()
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=_IS_SECURE_ENV,
+        samesite="strict",
+        path="/api",
+        max_age=expiry_hours * 3600,
+    )
+    return response
 
 
 @app.post("/api/auth/login")
-def auth_login(body: LoginRequest):
+@limiter.limit("5/minute")
+def auth_login(request: Request, body: LoginRequest):
     """Authenticate and receive a JWT. Only active in JWT mode."""
     if _AUTH_MODE != "jwt":
         raise HTTPException(status_code=404, detail="Auth endpoints require AUTH_MODE=jwt")
@@ -1342,16 +1738,89 @@ def auth_login(body: LoginRequest):
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     email = body.email.lower().strip()
+
+    # M10: Brute-force check
+    now = _time.time()
+    attempts = _login_attempts.get(email, [])
+    attempts = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
+    _login_attempts[email] = attempts
+
+    if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again in 15 minutes.",
+            headers={"Retry-After": str(_LOGIN_WINDOW_SECONDS)},
+        )
+
+    # Progressive delay after 3 failures
+    if len(attempts) >= 3:
+        delay = min(2 ** (len(attempts) - 3), 30)
+        _time.sleep(delay)
+
     user = repo.get_user_by_email(email)
     if not user:
+        _login_attempts.setdefault(email, []).append(now)
+        # M9: Log login failure
+        try:
+            repo.log_auth_event({
+                "event_type": "login_failure",
+                "email": email,
+                "ip_address": _extract_ip(request),
+                "user_agent": request.headers.get("user-agent"),
+                "success": False,
+                "details": "Invalid email or password",
+            })
+        except Exception:
+            pass
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    if not bcrypt.checkpw(body.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+    # L1: Dual-check — try new SHA-256 pre-hash first, fall back to old style (and rehash)
+    pw_sha = hashlib.sha256(body.password.encode("utf-8")).digest()
+    if bcrypt.checkpw(pw_sha, user["password_hash"].encode("utf-8")):
+        pass  # New-style hash matches
+    elif bcrypt.checkpw(body.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+        # Old-style hash matches — migrate to new pre-hashed format
+        new_hash = bcrypt.hashpw(pw_sha, bcrypt.gensalt()).decode("utf-8")
+        try:
+            repo.update_user_password_hash(user["id"], new_hash)
+        except Exception:
+            pass  # Non-fatal — migration will retry on next login
+    else:
+        _login_attempts.setdefault(email, []).append(now)
+        # M9: Log login failure
+        try:
+            repo.log_auth_event({
+                "event_type": "login_failure",
+                "email": email,
+                "ip_address": _extract_ip(request),
+                "user_agent": request.headers.get("user-agent"),
+                "success": False,
+                "details": "Invalid email or password",
+            })
+        except Exception:
+            pass
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Clear attempts on successful login
+    _login_attempts.pop(email, None)
+
+    # M9: Log login success
+    try:
+        repo.log_auth_event({
+            "event_type": "login_success",
+            "email": user["email"],
+            "user_id": user["id"],
+            "ip_address": _extract_ip(request),
+            "user_agent": request.headers.get("user-agent"),
+            "success": True,
+        })
+    except Exception:
+        pass
 
     secret = _get_jwt_secret()
-    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))
+    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "2"))
     payload = {
+        "jti": str(uuid.uuid4()),
         "sub": user["id"],
         "email": user["email"],
         "role": "user",
@@ -1359,7 +1828,58 @@ def auth_login(body: LoginRequest):
         "exp": datetime.now(timezone.utc) + timedelta(hours=expiry_hours),
     }
     token = pyjwt.encode(payload, secret, algorithm="HS256")
-    return {"user_id": user["id"], "email": user["email"], "token": token}
+
+    # M2: Generate refresh token
+    now_ts = datetime.now(timezone.utc)
+    refresh_jti = str(uuid.uuid4())
+    refresh_payload = {
+        "jti": refresh_jti,
+        "sub": user["id"],
+        "type": "refresh",
+        "iat": now_ts,
+        "exp": now_ts + timedelta(days=7),
+    }
+    refresh_token = pyjwt.encode(refresh_payload, secret, algorithm="HS256")
+    repo.store_refresh_token(refresh_jti, user["id"], (now_ts + timedelta(days=7)).isoformat())
+
+    # H7: Set HttpOnly cookie + CSRF cookie
+    from starlette.responses import JSONResponse
+    response = JSONResponse({"user_id": user["id"], "email": user["email"], "token": token, "refresh_token": refresh_token})
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=_IS_SECURE_ENV,
+        samesite="strict",
+        path="/api",
+        max_age=expiry_hours * 3600,
+    )
+    csrf_token = _generate_csrf_token()
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=_IS_SECURE_ENV,
+        samesite="strict",
+        path="/api",
+        max_age=expiry_hours * 3600,
+    )
+    return response
+
+
+@app.get("/api/auth/verify")
+def auth_verify_email(token: str = Query(...)):
+    """Verify email address using the token sent during signup. Only active in JWT mode."""
+    if _AUTH_MODE != "jwt":
+        raise HTTPException(status_code=404, detail="Auth endpoints require AUTH_MODE=jwt")
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    user = repo.get_user_by_verification_token(token)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid verification token")
+    repo.mark_email_verified(user["id"])
+    return {"detail": "Email verified successfully"}
 
 
 @app.get("/api/auth/me")
@@ -1378,6 +1898,142 @@ def auth_me(user: dict = Depends(get_current_user)):
         "auth_mode": "jwt",
         "created_at": db_user["created_at"] if db_user else None,
     }
+
+
+@app.post("/api/auth/logout")
+@limiter.limit("5/minute")
+def auth_logout(request: Request, user: dict = Depends(get_current_user)):
+    """Revoke the current JWT token by adding its jti to the blacklist."""
+    if _AUTH_MODE != "jwt":
+        # H7: Clear cookies even in stub mode
+        from starlette.responses import JSONResponse
+        response = JSONResponse({"detail": "Logged out (stub mode)"})
+        response.delete_cookie(key="auth_token", path="/api")
+        response.delete_cookie(key="csrf_token", path="/api")
+        return response
+    jti = user.get("jti")
+    if not jti:
+        return {"detail": "Token has no jti — issued before revocation support"}
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    repo.blacklist_token(
+        jti=jti,
+        user_id=user["user_id"],
+        expires_at=datetime.fromtimestamp(user["exp"], tz=timezone.utc).isoformat(),
+    )
+    # M9: Log logout event
+    try:
+        repo.log_auth_event({
+            "event_type": "logout",
+            "user_id": user["user_id"],
+            "ip_address": _extract_ip(request),
+            "user_agent": request.headers.get("user-agent"),
+            "success": True,
+        })
+    except Exception:
+        pass
+    # H7: Clear auth and CSRF cookies
+    from starlette.responses import JSONResponse
+    response = JSONResponse({"detail": "Logged out successfully"})
+    response.delete_cookie(key="auth_token", path="/api")
+    response.delete_cookie(key="csrf_token", path="/api")
+    return response
+
+
+@app.post("/api/auth/refresh")
+@limiter.limit("10/minute")
+def auth_refresh(request: Request, body: RefreshRequest):
+    """Exchange a valid refresh token for a new access token + refresh token pair.
+    Implements rotation: the old refresh token is revoked on use."""
+    if _AUTH_MODE != "jwt":
+        raise HTTPException(status_code=404, detail="Auth endpoints require AUTH_MODE=jwt")
+
+    import jwt as pyjwt
+    secret = _get_jwt_secret()
+    try:
+        payload = pyjwt.decode(body.refresh_token, secret, algorithms=["HS256"])
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Not a refresh token")
+
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Check if revoked
+    stored = repo.get_refresh_token(payload["jti"])
+    if not stored or stored["revoked"]:
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+
+    # Rotate: revoke old, issue new pair
+    repo.revoke_refresh_token(payload["jti"])
+
+    user_id = payload["sub"]
+    now_ts = datetime.now(timezone.utc)
+    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "2"))
+
+    # New access token
+    new_access_payload = {
+        "jti": str(uuid.uuid4()),
+        "sub": user_id,
+        "role": "user",
+        "iat": now_ts,
+        "exp": now_ts + timedelta(hours=expiry_hours),
+    }
+    access_token = pyjwt.encode(new_access_payload, secret, algorithm="HS256")
+
+    # New refresh token
+    new_refresh_jti = str(uuid.uuid4())
+    new_refresh_payload = {
+        "jti": new_refresh_jti,
+        "sub": user_id,
+        "type": "refresh",
+        "iat": now_ts,
+        "exp": now_ts + timedelta(days=7),
+    }
+    new_refresh_token = pyjwt.encode(new_refresh_payload, secret, algorithm="HS256")
+    repo.store_refresh_token(new_refresh_jti, user_id, (now_ts + timedelta(days=7)).isoformat())
+
+    # M9: Log token refresh
+    try:
+        repo.log_auth_event({
+            "event_type": "token_refresh",
+            "user_id": user_id,
+            "ip_address": _extract_ip(request),
+            "user_agent": request.headers.get("user-agent"),
+            "success": True,
+        })
+    except Exception:
+        pass
+
+    # H7: Set new cookies
+    from starlette.responses import JSONResponse
+    response = JSONResponse({"token": access_token, "refresh_token": new_refresh_token})
+    response.set_cookie(
+        key="auth_token",
+        value=access_token,
+        httponly=True,
+        secure=_IS_SECURE_ENV,
+        samesite="strict",
+        path="/api",
+        max_age=expiry_hours * 3600,
+    )
+    csrf_token = _generate_csrf_token()
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=_IS_SECURE_ENV,
+        samesite="strict",
+        path="/api",
+        max_age=expiry_hours * 3600,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1733,6 +2389,7 @@ def _build_visible_narrative(n: dict, repo, include_full: bool = False, signal_l
         "source_stats": _build_source_stats(docs),
         "last_evidence_at": docs[0].get("published_at", "") if docs else "",
         "signal_direction": sig.get("direction") if sig else None,
+        "signal_confidence": round(float(sig.get("confidence") or 0.0), 4) if sig else None,
         "signal_certainty": sig.get("certainty") if sig else None,
         "signal_catalyst_type": sig.get("catalyst_type") if sig else None,
     }
@@ -1743,6 +2400,7 @@ def _build_visible_narrative(n: dict, repo, include_full: bool = False, signal_l
 # ===========================================================================
 
 @app.get("/api/health")
+@limiter.exempt
 def health():
     return {"status": "ok"}
 
@@ -1768,21 +2426,27 @@ def websocket_status():
 
 
 @app.get("/api/narratives")
+@limiter.limit("30/minute")
 def get_narratives(
-    x_auth_token: Optional[str] = Header(None),
+    request: Request,
     topic: Optional[str] = None,
     stage: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user: dict = Depends(get_optional_user),
 ):
     """
     Returns all active narratives as full visible objects, sorted by ns_score desc.
-    Monetization gating removed in D4 — all narratives visible to everyone.
+    Supports ?limit=N&offset=N for pagination. Topic/stage filtering applied at SQL level.
     """
     repo = get_repo()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    rows = repo.get_all_active_narratives()
-    rows.sort(key=lambda r: float(r.get("ns_score") or 0.0), reverse=True)
+    # H5: DB-level pagination with stage/topic filters and ORDER BY ns_score DESC
+    rows = repo.get_all_active_narratives(
+        limit=limit, offset=offset, stage=stage, topic=topic,
+    )
 
     signal_lookup = _build_signal_lookup(repo)
 
@@ -1790,25 +2454,18 @@ def get_narratives(
     for n in rows:
         result.append(_build_visible_narrative(n, repo, signal_lookup=signal_lookup))
 
-    # F4: filter by topic tag
-    if topic:
-        result = [n for n in result if topic in (n.get("topic_tags") or [])]
-    # F1: filter by stage
-    if stage:
-        result = [n for n in result if n.get("stage") == stage]
-
     return result
 
 
 @app.get("/api/ticker")
-def get_ticker():
+@limiter.limit("30/minute")
+def get_ticker(request: Request, user: dict = Depends(get_optional_user)):
     """Returns up to 10 ticker items with narrative id for click navigation. Minimum 5 guaranteed."""
     repo = get_repo()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    rows = repo.get_all_active_narratives()
-    rows.sort(key=lambda r: float(r.get("ns_score") or 0.0), reverse=True)
+    rows = repo.get_all_active_narratives(limit=10)
 
     items = [
         {
@@ -1816,7 +2473,7 @@ def get_ticker():
             "name": n.get("name") or f"Narrative {n['narrative_id'][:8]}",
             "velocity_summary": _format_velocity_summary(n.get("velocity_windowed")),
         }
-        for n in rows[:10]
+        for n in rows
     ]
 
     while len(items) < 5:
@@ -1830,7 +2487,8 @@ def get_ticker():
 
 
 @app.get("/api/narratives/{narrative_id}")
-def get_narrative_detail(narrative_id: str):
+@limiter.limit("30/minute")
+def get_narrative_detail(request: Request, narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """
     Returns the full Narrative payload with nested Signal, Catalyst, Mutation
     objects and entropy_detail. Used by the Investigate drawer and detail page.
@@ -1948,7 +2606,8 @@ def get_narrative_detail(narrative_id: str):
 
 
 @app.get("/api/constellation")
-def get_constellation():
+@_timeout()
+def get_constellation(user: dict = Depends(get_optional_user)):
     """
     Returns a force-directed graph for the constellation map.
     Nodes: narrative + catalyst nodes. Edges: shared assets (related) + mutations (triggered).
@@ -2060,20 +2719,22 @@ def topup_credits(body: TopupRequest, user: dict = Depends(get_current_user)):
 # ===========================================================================
 
 @app.get("/api/asset-classes")
-def get_asset_classes():
+def get_asset_classes(user: dict = Depends(get_optional_user)):
     """Returns all AssetClass objects."""
     return ASSET_CLASSES
 
 
 @app.get("/api/securities")
-def get_securities():
+@limiter.limit("30/minute")
+def get_securities(request: Request, user: dict = Depends(get_optional_user)):
     """Returns all TrackedSecurity objects (static + dynamically discovered from narratives)."""
     combined = list(TRACKED_SECURITIES) + list(_DYNAMIC_SECURITIES.values())
     return combined
 
 
 @app.get("/api/narratives/{narrative_id}/assets")
-def get_narrative_assets(narrative_id: str):
+@limiter.limit("30/minute")
+def get_narrative_assets(request: Request, narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """
     Returns NarrativeAsset objects for a narrative, each with nested asset_class
     and securities list. Returns [] if no associations found.
@@ -2087,16 +2748,64 @@ def get_narrative_assets(narrative_id: str):
     return _build_narrative_assets(narrative_id)
 
 
+@app.get("/api/narratives/{narrative_id}/signal")
+@limiter.limit("30/minute")
+def get_narrative_signal_endpoint(request: Request, narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
+    """Return structured signal data for a single narrative."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    signal = repo.get_narrative_signal(narrative_id)
+    if not signal:
+        return {"narrative_id": narrative_id, "signal": None}
+    signal_dict = dict(signal)
+    signal_dict["key_actors"] = _safe_json_loads_list(signal_dict.get("key_actors") or "[]")
+    signal_dict["affected_sectors"] = _safe_json_loads_list(signal_dict.get("affected_sectors") or "[]")
+    return {"narrative_id": narrative_id, "signal": signal_dict}
+
+
+@app.get("/api/signals/leaderboard")
+@limiter.limit("30/minute")
+def get_signal_leaderboard(request: Request, limit: int = Query(50, ge=1, le=500), user: dict = Depends(get_optional_user)):
+    """Top narratives ranked by confidence * direction strength."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    signals = repo.get_all_narrative_signals()
+    enriched = []
+    for sig in signals:
+        try:
+            nar = repo.get_narrative(sig["narrative_id"])
+        except Exception:
+            continue
+        if nar and not nar.get("suppressed"):
+            enriched.append({
+                "narrative_id": sig["narrative_id"],
+                "name": nar["name"],
+                "stage": nar.get("stage"),
+                "direction": sig["direction"],
+                "confidence": sig["confidence"],
+                "magnitude": sig.get("magnitude"),
+                "certainty": sig.get("certainty"),
+                "catalyst_type": sig.get("catalyst_type"),
+                "signal_strength": float(sig.get("confidence") or 0.0) * (1.0 if sig.get("direction") != "neutral" else 0.0),
+            })
+    enriched.sort(key=lambda x: x["signal_strength"], reverse=True)
+    return enriched[:limit]
+
+
 # ===========================================================================
 # D2 Endpoints — Finnhub Quote
 # ===========================================================================
 
 @app.get("/api/securities/{symbol}/quote")
-def get_security_quote(symbol: str):
+@limiter.limit("30/minute")
+def get_security_quote(request: Request, symbol: str = FPath(..., max_length=12), user: dict = Depends(get_optional_user)):
     """
     Returns the latest cached Finnhub quote dict for the given symbol.
     Returns {"symbol": symbol, "available": false} if unavailable or key not set.
     """
+    symbol = _validate_symbol(symbol)
     if not finnhub.is_enabled():
         return {"symbol": symbol, "available": False}
     # fetch_quote returns cached data if within TTL; None if disabled/failed
@@ -2124,7 +2833,7 @@ def toggle_subscription(user: dict = Depends(get_current_user)):
 
 
 @app.post("/api/narratives/{narrative_id}/export")
-def export_narrative(narrative_id: str, user: dict = Depends(get_current_user)):
+def export_narrative(narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_current_user)):
     """
     Generates a CSV export of the narrative's signals, catalysts, and mutations.
     Requires auth + active subscription (returns 403 otherwise).
@@ -2192,7 +2901,8 @@ def export_narrative(narrative_id: str, user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/signals")
-def get_signals():
+@limiter.limit("30/minute")
+def get_signals(request: Request, user: dict = Depends(get_optional_user)):
     """
     Returns a flat list of Signal objects from the top active narratives.
     Sorted newest first. Includes coordination_flag.
@@ -2201,12 +2911,11 @@ def get_signals():
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    rows = repo.get_all_active_narratives()
-    rows.sort(key=lambda r: float(r.get("ns_score") or 0.0), reverse=True)
+    rows = repo.get_all_active_narratives(limit=5)
 
     signals = []
     seen_ids = set()
-    for n in rows[:5]:
+    for n in rows:
         nid = n["narrative_id"]
         try:
             docs = repo.get_document_evidence(nid)
@@ -2243,10 +2952,9 @@ def _ticker_payload() -> list:
     repo = get_repo()
     if repo is None:
         return []
-    rows = repo.get_all_active_narratives()
-    rows.sort(key=lambda r: float(r.get("ns_score") or 0.0), reverse=True)
+    rows = repo.get_all_active_narratives(limit=10)
     items = []
-    for n in rows[:10]:
+    for n in rows:
         vel = float(n.get("velocity_windowed") or 0.0)
         nudged = vel * (1 + random.uniform(-0.05, 0.05))
         pct = round(nudged * 100, 1)
@@ -2264,29 +2972,70 @@ def _ticker_payload() -> list:
 
 
 @app.get("/api/stream")
-async def stream():
+@limiter.limit("2/minute")
+async def stream(request: Request, token: str = Query(None)):
     """
     SSE endpoint — emits ticker-update events every 8 seconds.
-    NOTE: Next.js proxy buffers chunked responses. Wire this directly in C4
-    via client-side EventSource to http://localhost:8000/api/stream.
-    The primary real-time strategy in the frontend is polling /api/ticker every 10s.
+    Auth: pass JWT as ?token= query parameter (EventSource cannot set headers).
+    Stub mode: no token required, user_id = "local".
     """
+    global _sse_connections
+
+    # --- Auth ---
+    if _AUTH_MODE == "stub":
+        user_id = "local"
+    else:
+        if not token:
+            raise HTTPException(status_code=403, detail="Authentication required")
+        payload = _decode_jwt(token)
+        user_id = payload.get("sub", "unknown")
+
+    # --- Connection limits ---
+    lock = _sse_lock or asyncio.Lock()
+
+    async with lock:
+        if _sse_connections >= _SSE_MAX_GLOBAL:
+            raise HTTPException(status_code=503, detail="SSE connection limit reached")
+        user_count = _sse_per_user.get(user_id, 0)
+        if user_count >= _SSE_MAX_PER_USER:
+            raise HTTPException(status_code=429, detail="Per-user SSE connection limit reached")
+        _sse_connections += 1
+        _sse_per_user[user_id] = user_count + 1
+
     if _SSE_AVAILABLE:
         async def event_generator():
-            # Yield an immediate "connected" event so clients get headers right away
-            yield {"data": json.dumps({"type": "connected"})}
-            while True:
-                await asyncio.sleep(8)
-                yield {"data": json.dumps({"type": "ticker-update", "items": _ticker_payload()})}
+            global _sse_connections
+            try:
+                yield {"data": json.dumps({"type": "connected"})}
+                while True:
+                    await asyncio.sleep(8)
+                    yield {"data": json.dumps(_latest_ticker_payload)}
+            finally:
+                async with lock:
+                    _sse_connections = max(0, _sse_connections - 1)
+                    cur = _sse_per_user.get(user_id, 1)
+                    if cur <= 1:
+                        _sse_per_user.pop(user_id, None)
+                    else:
+                        _sse_per_user[user_id] = cur - 1
         return EventSourceResponse(event_generator())
     else:
-        # Fallback: manual StreamingResponse
         async def manual_generator():
-            yield "data: {\"type\": \"connected\"}\n\n"
-            while True:
-                await asyncio.sleep(8)
-                payload = json.dumps({"type": "ticker-update", "items": _ticker_payload()})
-                yield f"data: {payload}\n\n"
+            global _sse_connections
+            try:
+                yield "data: {\"type\": \"connected\"}\n\n"
+                while True:
+                    await asyncio.sleep(8)
+                    payload = json.dumps(_latest_ticker_payload)
+                    yield f"data: {payload}\n\n"
+            finally:
+                async with lock:
+                    _sse_connections = max(0, _sse_connections - 1)
+                    cur = _sse_per_user.get(user_id, 1)
+                    if cur <= 1:
+                        _sse_per_user.pop(user_id, None)
+                    else:
+                        _sse_per_user[user_id] = cur - 1
         return StreamingResponse(manual_generator(), media_type="text/event-stream")
 
 
@@ -2295,11 +3044,14 @@ async def stream():
 # ===========================================================================
 
 @app.get("/api/stocks")
+@limiter.limit("30/minute")
 def get_stocks(
+    request: Request,
     sort_by: str = "impact",
     sort_order: str = "desc",
     asset_class: Optional[str] = None,
     min_impact: Optional[int] = None,
+    user: dict = Depends(get_optional_user),
 ):
     """
     Returns filtered and sorted list of TrackedSecurity objects.
@@ -2329,12 +3081,14 @@ def get_stocks(
 
 
 @app.get("/api/stocks/{symbol}")
-def get_stock_detail(symbol: str):
+@limiter.limit("30/minute")
+def get_stock_detail(request: Request, symbol: str = FPath(..., max_length=12), user: dict = Depends(get_optional_user)):
     """
     Returns a single TrackedSecurity extended with a "narratives" field listing
     which narratives affect this security and how.
     Returns 404 if symbol not found.
     """
+    symbol = _validate_symbol(symbol)
     all_secs = list(TRACKED_SECURITIES) + list(_DYNAMIC_SECURITIES.values())
     sec = next(
         (s for s in all_secs if s["symbol"].upper() == symbol.upper()),
@@ -2548,7 +3302,7 @@ def add_to_watchlist(req: WatchlistAddRequest, user: dict = Depends(get_optional
 
 
 @app.delete("/api/watchlist/remove/{item_id}")
-def remove_from_watchlist(item_id: str, user: dict = Depends(get_optional_user)):
+def remove_from_watchlist(item_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Remove item from watchlist."""
     repo = get_repo()
     if repo is None:
@@ -2565,14 +3319,19 @@ def remove_from_watchlist(item_id: str, user: dict = Depends(get_optional_user))
 # --- Alert Rules ---
 
 class AlertRuleRequest(BaseModel):
-    rule_type: Literal["ns_above", "ns_below", "new_narrative", "mutation", "stage_change", "catalyst"]
-    target_type: Literal["narrative", "ticker"]
+    rule_type: Literal[
+        "ns_above", "ns_below", "new_narrative", "mutation", "stage_change", "catalyst",
+        "price_above", "price_below", "pct_change",
+        "rsi_overbought", "rsi_oversold", "macd_crossover",
+        "sentiment_spike", "portfolio_drawdown",
+    ]
+    target_type: Literal["narrative", "ticker", "portfolio"]
     target_id: str = ""
     threshold: float = 0.0
 
 
 @app.get("/api/alerts/types")
-def get_alert_types():
+def get_alert_types(user: dict = Depends(get_optional_user)):
     """Returns available alert rule types."""
     return RULE_TYPES
 
@@ -2599,7 +3358,7 @@ def create_alert_rule(req: AlertRuleRequest, user: dict = Depends(get_optional_u
 
 
 @app.delete("/api/alerts/rules/{rule_id}")
-def delete_alert_rule(rule_id: str, user: dict = Depends(get_optional_user)):
+def delete_alert_rule(rule_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Delete an alert rule."""
     repo = get_repo()
     if repo is None:
@@ -2615,7 +3374,7 @@ def delete_alert_rule(rule_id: str, user: dict = Depends(get_optional_user)):
 
 
 @app.post("/api/alerts/rules/{rule_id}/toggle")
-def toggle_alert_rule(rule_id: str, user: dict = Depends(get_optional_user)):
+def toggle_alert_rule(rule_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Toggle an alert rule enabled/disabled."""
     repo = get_repo()
     if repo is None:
@@ -2642,7 +3401,7 @@ def get_alerts(unread_only: bool = False, user: dict = Depends(get_optional_user
 
 
 @app.post("/api/alerts/read/{notification_id}")
-def mark_alert_read(notification_id: str, user: dict = Depends(get_optional_user)):
+def mark_alert_read(notification_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Mark a notification as read."""
     repo = get_repo()
     if repo is None:
@@ -2686,6 +3445,7 @@ def get_manipulation(
     indicator_type: Optional[str] = None,
     min_confidence: Optional[float] = None,
     status: Optional[str] = None,
+    user: dict = Depends(get_optional_user),
 ):
     """
     Returns narratives augmented with their ManipulationIndicators.
@@ -2742,7 +3502,7 @@ def get_manipulation(
 
 
 @app.get("/api/narratives/{narrative_id}/manipulation")
-def get_narrative_manipulation(narrative_id: str):
+def get_narrative_manipulation(narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Returns ManipulationIndicator objects for the given narrative_id. Returns [] if none."""
     repo = get_repo()
     if repo is not None:
@@ -2773,8 +3533,9 @@ def _interpret_entropy(entropy: float | None) -> str:
 
 
 @app.get("/api/brief/{ticker}")
-def get_brief(ticker: str):
+def get_brief(ticker: str = FPath(..., max_length=12), user: dict = Depends(get_optional_user)):
     """Pre-earnings intelligence brief for a specific ticker."""
+    ticker = _validate_symbol(ticker)
     # Find security
     sec = next((s for s in TRACKED_SECURITIES if s["symbol"].upper() == ticker.upper()), None)
     if sec is None:
@@ -2880,7 +3641,8 @@ def get_brief(ticker: str):
 # ===========================================================================
 
 @app.get("/api/narratives/{narrative_id}/history")
-def get_narrative_history(narrative_id: str, days: int = 30):
+@limiter.limit("30/minute")
+def get_narrative_history(request: Request, narrative_id: str = FPath(..., max_length=50), days: int = 30, user: dict = Depends(get_optional_user)):
     """Returns daily snapshots for the narrative over the specified period."""
     days = max(1, min(days, 365))
     repo = get_repo()
@@ -2907,12 +3669,28 @@ def get_narrative_history(narrative_id: str, days: int = 30):
 
 
 @app.get("/api/ticker/{symbol}/price-history")
-def get_price_history_endpoint(symbol: str, days: int = 30):
-    """Returns daily closing prices from yfinance, cached."""
+@limiter.limit("30/minute")
+def get_price_history_endpoint(
+    request: Request,
+    symbol: str = FPath(..., max_length=12),
+    days: int = 30,
+    interval: str = "1d",
+    period: str = "",
+    user: dict = Depends(get_optional_user),
+):
+    """Returns OHLCV price history from yfinance, cached."""
     symbol = _validate_symbol(symbol)
+    # Period shortcuts override days
+    from datetime import date as _date
+    _PERIOD_MAP = {"1D": 1, "5D": 5, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+    if period == "YTD":
+        today = _date.today()
+        days = (today - _date(today.year, 1, 1)).days or 1
+    elif period in _PERIOD_MAP:
+        days = _PERIOD_MAP[period]
     days = max(1, min(days, 365))
     from stock_data import get_price_history
-    data = get_price_history(symbol, days)
+    data = get_price_history(symbol, days, interval)
     if not data:
         return {"symbol": symbol, "data": [], "available": False}
     return {"symbol": symbol, "data": data, "available": True}
@@ -2923,7 +3701,8 @@ def get_price_history_endpoint(symbol: str, days: int = 30):
 # ===========================================================================
 
 @app.get("/api/correlations/{narrative_id}/{ticker}")
-def get_correlation(narrative_id: str, ticker: str, lead_days: int = Query(1, ge=0, le=90)):
+@limiter.limit("10/minute")
+def get_correlation(request: Request, narrative_id: str = FPath(..., max_length=50), ticker: str = FPath(..., max_length=12), lead_days: int = Query(1, ge=0, le=90), user: dict = Depends(get_optional_user)):
     """Returns correlation analysis between narrative velocity and ticker price."""
     ticker = _validate_symbol(ticker)
     repo = get_repo()
@@ -2956,7 +3735,7 @@ def get_correlation(narrative_id: str, ticker: str, lead_days: int = Query(1, ge
 # --- 1.2: Coordination endpoints ---
 
 @app.get("/api/narratives/{narrative_id}/coordination")
-def get_narrative_coordination(narrative_id: str):
+def get_narrative_coordination(narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Returns adversarial coordination events for a narrative."""
     repo = get_repo()
     if repo is None:
@@ -2974,7 +3753,7 @@ def get_narrative_coordination(narrative_id: str):
 
 
 @app.get("/api/coordination/summary")
-def get_coordination_summary():
+def get_coordination_summary(user: dict = Depends(get_optional_user)):
     """Aggregate coordination stats across all narratives."""
     repo = get_repo()
     if repo is None:
@@ -3012,10 +3791,11 @@ _CONTRARIAN_CACHE_TTL = 14400  # 4 hours
 
 
 @app.get("/api/correlations/top")
-def get_top_correlations(limit: int = 20, lead_days: int = Query(1, ge=0, le=90)):
+@limiter.limit("10/minute")
+@_timeout()
+def get_top_correlations(request: Request, limit: int = 20, lead_days: int = Query(1, ge=0, le=90), user: dict = Depends(get_optional_user)):
     """Returns top narrative-ticker correlations by absolute strength. Cached 15min."""
     import time as _time
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
     global _correlation_cache, _correlation_cache_at
 
     limit = min(limit, 100)  # cap to prevent abuse
@@ -3033,12 +3813,12 @@ def get_top_correlations(limit: int = 20, lead_days: int = Query(1, ge=0, le=90)
     from stock_data import get_price_history
     from correlation_service import compute_velocity_price_correlation
 
-    rows = repo.get_all_active_narratives()
+    rows = repo.get_all_active_narratives(limit=30)
     pairs = []
 
     # Collect all (narrative, ticker) work items
     work_items = []
-    for n in rows[:30]:
+    for n in rows:
         nid = n["narrative_id"]
         linked = json.loads(n.get("linked_assets") or "[]")
         tickers = [a.get("ticker") or a.get("symbol") for a in linked if isinstance(a, dict) and (a.get("ticker") or a.get("symbol"))]
@@ -3051,32 +3831,31 @@ def get_top_correlations(limit: int = 20, lead_days: int = Query(1, ge=0, le=90)
         for ticker in tickers[:3]:
             work_items.append((nid, n, ticker.upper(), vel_history))
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {}
-        for nid, n, ticker, vel_history in work_items:
-            future = executor.submit(get_price_history, ticker, 90)
-            futures[future] = (nid, n, ticker, vel_history)
+    futures = {}
+    for nid, n, ticker, vel_history in work_items:
+        future = _REQUEST_EXECUTOR.submit(get_price_history, ticker, 90)
+        futures[future] = (nid, n, ticker, vel_history)
 
-        for future in futures:
-            nid, n, ticker, vel_history = futures[future]
-            try:
-                price_data = future.result(timeout=10)
-                if not price_data:
-                    continue
-                result = compute_velocity_price_correlation(vel_history, price_data, lead_days)
-                pairs.append({
-                    "narrative_id": nid,
-                    "narrative_name": n.get("name") or "",
-                    "ticker": ticker,
-                    "correlation": result["correlation"],
-                    "p_value": result["p_value"],
-                    "n_observations": result["n_observations"],
-                    "is_significant": bool(result["is_significant"]),
-                    "interpretation": result["interpretation"],
-                    "lead_days": lead_days,
-                })
-            except (FuturesTimeout, Exception):
+    for future in futures:
+        nid, n, ticker, vel_history = futures[future]
+        try:
+            price_data = future.result(timeout=30)
+            if not price_data:
                 continue
+            result = compute_velocity_price_correlation(vel_history, price_data, lead_days)
+            pairs.append({
+                "narrative_id": nid,
+                "narrative_name": n.get("name") or "",
+                "ticker": ticker,
+                "correlation": result["correlation"],
+                "p_value": result["p_value"],
+                "n_observations": result["n_observations"],
+                "is_significant": bool(result["is_significant"]),
+                "interpretation": result["interpretation"],
+                "lead_days": lead_days,
+            })
+        except (FuturesTimeout, Exception):
+            continue
 
     pairs.sort(key=lambda p: abs(p["correlation"]), reverse=True)
     with _correlation_cache_lock:
@@ -3088,7 +3867,9 @@ def get_top_correlations(limit: int = 20, lead_days: int = Query(1, ge=0, le=90)
 
 
 @app.get("/api/narratives/{narrative_id}/correlations")
-def get_narrative_correlations(narrative_id: str, lead_days: int = Query(1, ge=0, le=90)):
+@limiter.limit("10/minute")
+@_timeout()
+def get_narrative_correlations(request: Request, narrative_id: str = FPath(..., max_length=50), lead_days: int = Query(1, ge=0, le=90), user: dict = Depends(get_optional_user)):
     """All ticker correlations for one narrative."""
     repo = get_repo()
     if repo is None:
@@ -3107,25 +3888,23 @@ def get_narrative_correlations(narrative_id: str, lead_days: int = Query(1, ge=0
     snapshots = repo.get_snapshot_history(narrative_id, 90)
     vel_history = [{"date": s.get("snapshot_date"), "velocity": s.get("velocity")} for s in reversed(snapshots) if s.get("snapshot_date")]
 
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
     results = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(get_price_history, ticker.upper(), 90): ticker.upper()
-            for ticker in tickers
-        }
-        for future in futures:
-            ticker = futures[future]
-            try:
-                price_data = future.result(timeout=10)
-                if not price_data:
-                    continue
-                result = compute_velocity_price_correlation(vel_history, price_data, lead_days)
-                result["ticker"] = ticker
-                result["narrative_id"] = narrative_id
-                results.append(result)
-            except (FuturesTimeout, Exception):
+    futures = {
+        _REQUEST_EXECUTOR.submit(get_price_history, ticker.upper(), 90): ticker.upper()
+        for ticker in tickers
+    }
+    for future in futures:
+        ticker = futures[future]
+        try:
+            price_data = future.result(timeout=30)
+            if not price_data:
                 continue
+            result = compute_velocity_price_correlation(vel_history, price_data, lead_days)
+            result["ticker"] = ticker
+            result["narrative_id"] = narrative_id
+            results.append(result)
+        except (FuturesTimeout, Exception):
+            continue
 
     results.sort(key=lambda r: abs(r["correlation"]), reverse=True)
     return results
@@ -3134,7 +3913,9 @@ def get_narrative_correlations(narrative_id: str, lead_days: int = Query(1, ge=0
 # --- Phase 0: Multi-signal analysis ---
 
 @app.get("/api/analytics/signal-ranking")
-def get_signal_ranking(days: int = 90, threshold: float = 2.0):
+@limiter.limit("10/minute")
+@_timeout()
+def get_signal_ranking(request: Request, days: int = 90, threshold: float = 2.0, user: dict = Depends(get_optional_user)):
     """
     Runs generalized correlation across ALL snapshot metrics for ALL qualifying
     narratives at multiple lead_days values. Returns metrics ranked by predictive
@@ -3149,7 +3930,6 @@ def get_signal_ranking(days: int = 90, threshold: float = 2.0):
     days = max(7, min(days, 365))
     import math
     import warnings
-    from concurrent.futures import ThreadPoolExecutor
     from scipy.stats import pearsonr
     from correlation_service import (
         compute_metric_price_correlation,
@@ -3202,18 +3982,17 @@ def get_signal_ranking(days: int = 90, threshold: float = 2.0):
         all_tickers.update(q["tickers"])
 
     price_cache: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(get_price_history, t, days): t
-            for t in all_tickers
-        }
-        for future in futures:
-            ticker = futures[future]
-            try:
-                data = future.result(timeout=15)
-                if data:
-                    price_cache[ticker] = data
-            except Exception:
+    futures = {
+        _REQUEST_EXECUTOR.submit(get_price_history, t, days): t
+        for t in all_tickers
+    }
+    for future in futures:
+        ticker = futures[future]
+        try:
+            data = future.result(timeout=30)
+            if data:
+                price_cache[ticker] = data
+        except Exception:
                 continue
 
     # For each narrative-ticker pair, get snapshot history and run correlations
@@ -3338,7 +4117,7 @@ def get_signal_ranking(days: int = 90, threshold: float = 2.0):
 # --- 1.4: Per-domain source breakdown ---
 
 @app.get("/api/narratives/{narrative_id}/sources")
-def get_narrative_sources(narrative_id: str):
+def get_narrative_sources(narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Returns per-domain source breakdown for a narrative."""
     repo = get_repo()
     if repo is None:
@@ -3368,7 +4147,7 @@ def get_narrative_sources(narrative_id: str):
 # --- 1.5: Candidate buffer indicator ---
 
 @app.get("/api/pipeline/buffer")
-def get_buffer_status():
+def get_buffer_status(user: dict = Depends(get_optional_user)):
     """Returns candidate buffer counts."""
     repo = get_repo()
     if repo is None:
@@ -3381,7 +4160,7 @@ def get_buffer_status():
 # --- 1.8: Paginated evidence documents ---
 
 @app.get("/api/narratives/{narrative_id}/documents")
-def get_narrative_documents(narrative_id: str, limit: int = 10, offset: int = 0):
+def get_narrative_documents(narrative_id: str = FPath(..., max_length=50), limit: int = 10, offset: int = 0, user: dict = Depends(get_optional_user)):
     """Paginated evidence documents for a narrative."""
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
@@ -3391,9 +4170,8 @@ def get_narrative_documents(narrative_id: str, limit: int = 10, offset: int = 0)
     n = repo.get_narrative(narrative_id)
     if n is None:
         raise HTTPException(status_code=404, detail="Narrative not found")
-    all_docs = repo.get_document_evidence(narrative_id)
-    total = len(all_docs)
-    page = all_docs[offset:offset + limit]
+    total = repo.count_document_evidence(narrative_id)
+    page = repo.get_document_evidence(narrative_id, limit=limit, offset=offset)
     return {"items": page, "total": total, "limit": limit, "offset": offset}
 
 
@@ -3408,6 +4186,43 @@ def get_alert_count(user: dict = Depends(get_optional_user)):
     mgr = NotificationManager(repo)
     notifs = mgr.get_notifications(user["user_id"], unread_only=True)
     return {"unread": len(notifs)}
+
+
+@app.get("/api/alerts/stream")
+@limiter.limit("2/minute")
+async def alert_stream(request: Request, user: dict = Depends(get_optional_user)):
+    """SSE stream for real-time alert delivery. Polls new notifications every 5 seconds."""
+    user_id = user["user_id"]
+
+    if _SSE_AVAILABLE:
+        async def event_generator():
+            last_check = datetime.now(timezone.utc)
+            try:
+                yield {"data": json.dumps({"type": "connected"})}
+                while True:
+                    await asyncio.sleep(5)
+                    repo = get_repo()
+                    if repo is not None:
+                        new_alerts = repo.get_notifications_since(user_id, last_check)
+                        for alert in new_alerts:
+                            yield {"event": "alert", "data": json.dumps(alert)}
+                    last_check = datetime.now(timezone.utc)
+            except Exception:
+                pass
+        return EventSourceResponse(event_generator())
+    else:
+        async def manual_generator():
+            last_check = datetime.now(timezone.utc)
+            yield "data: {\"type\": \"connected\"}\n\n"
+            while True:
+                await asyncio.sleep(5)
+                repo = get_repo()
+                if repo is not None:
+                    new_alerts = repo.get_notifications_since(user_id, last_check)
+                    for alert in new_alerts:
+                        yield f"event: alert\ndata: {json.dumps(alert)}\n\n"
+                last_check = datetime.now(timezone.utc)
+        return StreamingResponse(manual_generator(), media_type="text/event-stream")
 
 
 # ===========================================================================
@@ -3480,7 +4295,7 @@ def add_holding(req: AddHoldingRequest, user: dict = Depends(get_optional_user))
 
 
 @app.delete("/api/portfolio/holdings/{holding_id}")
-def remove_holding(holding_id: str, user: dict = Depends(get_optional_user)):
+def remove_holding(holding_id: str = FPath(..., max_length=50), user: dict = Depends(get_optional_user)):
     """Remove a holding from portfolio."""
     repo = get_repo()
     if repo is None:
@@ -3537,10 +4352,340 @@ def get_portfolio_exposure(user: dict = Depends(get_optional_user)):
     return {"exposures": exposures}
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 — Portfolio Analytics Endpoints
+# ---------------------------------------------------------------------------
+
+def _get_portfolio_holdings_with_prices(user_id: str, repo) -> tuple[list[dict], float]:
+    """Helper: returns (enriched_holdings, total_value)."""
+    portfolio = repo.get_portfolio_by_user(user_id)
+    if portfolio is None:
+        return [], 0.0
+    holdings = repo.get_portfolio_holdings(portfolio["id"])
+    total_value = 0.0
+    for h in holdings:
+        sym = (h.get("ticker") or "").upper()
+        sec = next((s for s in TRACKED_SECURITIES if s["symbol"].upper() == sym), None)
+        if sec is None:
+            sec = _DYNAMIC_SECURITIES.get(sym)
+        price = float((sec or {}).get("current_price") or 0)
+        change_pct = float((sec or {}).get("price_change_24h") or 0)
+        shares = float(h.get("shares") or 0)
+        value = round(shares * price, 2)
+        cost_basis = h.get("cost_basis")
+        pnl = round(value - (float(cost_basis) * shares if cost_basis else value), 2)
+        h["current_price"] = price
+        h["price_change_24h"] = change_pct
+        h["current_value"] = value
+        h["day_change"] = round(value * change_pct / 100, 2)
+        h["pnl"] = pnl
+        total_value += value
+    return holdings, total_value
+
+
+@app.get("/api/portfolio/summary")
+def get_portfolio_summary(user: dict = Depends(get_optional_user)):
+    """Header stats: total_value, total_pnl, day_change, position_count."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    holdings, total_value = _get_portfolio_holdings_with_prices(user["user_id"], repo)
+    total_pnl = sum(h.get("pnl", 0) for h in holdings)
+    day_change = sum(h.get("day_change", 0) for h in holdings)
+    day_change_pct = round((day_change / total_value * 100) if total_value else 0, 2)
+    return {
+        "total_value": round(total_value, 2),
+        "total_pnl": round(total_pnl, 2),
+        "day_change": round(day_change, 2),
+        "day_change_pct": day_change_pct,
+        "position_count": len(holdings),
+    }
+
+
+@app.get("/api/portfolio/allocation")
+def get_portfolio_allocation(
+    group_by: str = Query("sector", pattern="^(sector|asset_class|risk)$"),
+    user: dict = Depends(get_optional_user),
+):
+    """Allocation breakdown for treemap visualization."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    holdings, total_value = _get_portfolio_holdings_with_prices(user["user_id"], repo)
+    if not holdings or total_value == 0:
+        return []
+
+    groups: dict[str, dict] = {}
+    for h in holdings:
+        sym = (h.get("ticker") or "").upper()
+        if group_by == "sector":
+            label = SECTOR_MAP.get(sym, "Other")
+        elif group_by == "asset_class":
+            sec = next((s for s in TRACKED_SECURITIES if s["symbol"].upper() == sym), None)
+            if sec:
+                ac = next((a for a in ASSET_CLASSES if a["id"] == sec.get("asset_class_id")), None)
+                label = ac["name"] if ac else "Other"
+            else:
+                label = "Other"
+        else:  # risk — simple bucketing by price change magnitude
+            chg = abs(h.get("price_change_24h") or 0)
+            label = "High Risk" if chg > 3 else ("Medium Risk" if chg > 1 else "Low Risk")
+
+        if label not in groups:
+            groups[label] = {"group": label, "value": 0.0, "pnl": 0.0, "tickers": []}
+        groups[label]["value"] += h.get("current_value", 0)
+        groups[label]["pnl"] += h.get("pnl", 0)
+        groups[label]["tickers"].append(sym)
+
+    result = []
+    for g in groups.values():
+        result.append({
+            "group": g["group"],
+            "value": round(g["value"], 2),
+            "pct": round(g["value"] / total_value, 4),
+            "pnl": round(g["pnl"], 2),
+            "tickers": g["tickers"],
+        })
+    result.sort(key=lambda x: x["value"], reverse=True)
+    return result
+
+
+_perf_cache: dict[str, tuple[float, dict]] = {}
+_PERF_CACHE_TTL = 3600  # 1 hour
+
+
+@app.get("/api/portfolio/performance")
+def get_portfolio_performance(
+    days: int = Query(90, ge=7, le=365),
+    benchmark: str = Query("SPY", max_length=12),
+    user: dict = Depends(get_optional_user),
+):
+    """Historical portfolio value vs benchmark."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    holdings, _ = _get_portfolio_holdings_with_prices(user["user_id"], repo)
+    if not holdings:
+        return {"portfolio": [], "benchmark": [], "total_return_pct": 0.0, "benchmark_return_pct": 0.0}
+
+    import time as _t
+    cache_key = f"{user['user_id']}:{days}:{benchmark}:" + ":".join(sorted(h["ticker"] for h in holdings))
+    now = _t.time()
+    if cache_key in _perf_cache:
+        ts, data = _perf_cache[cache_key]
+        if now - ts < _PERF_CACHE_TTL:
+            return data
+
+    try:
+        from stock_data import get_price_history as _gph
+    except ImportError:
+        return {"portfolio": [], "benchmark": [], "total_return_pct": 0.0, "benchmark_return_pct": 0.0}
+
+    # Build a date-indexed map of prices for each ticker
+    price_maps: dict[str, dict[str, float]] = {}
+    for h in holdings:
+        hist = _gph(h["ticker"], days=days)
+        price_maps[h["ticker"]] = {r["date"]: r["close"] for r in hist}
+
+    bench_hist = _gph(benchmark, days=days)
+    bench_map = {r["date"]: r["close"] for r in bench_hist}
+
+    # Collect all dates present in all holdings
+    all_dates: set[str] = set()
+    for pm in price_maps.values():
+        all_dates.update(pm.keys())
+    sorted_dates = sorted(all_dates)
+
+    # Compute portfolio value per day (using shares * price; fall back to last known price)
+    portfolio_series: list[dict] = []
+    last_prices: dict[str, float] = {}
+    for d in sorted_dates:
+        day_value = 0.0
+        for h in holdings:
+            p = price_maps[h["ticker"]].get(d)
+            if p is not None:
+                last_prices[h["ticker"]] = p
+            p = last_prices.get(h["ticker"], 0.0)
+            day_value += float(h.get("shares") or 0) * p
+        portfolio_series.append({"date": d, "value": round(day_value, 2)})
+
+    bench_series: list[dict] = [{"date": d, "value": bench_map[d]} for d in sorted_dates if d in bench_map]
+
+    # Returns
+    total_return_pct = 0.0
+    if len(portfolio_series) >= 2 and portfolio_series[0]["value"]:
+        total_return_pct = round((portfolio_series[-1]["value"] - portfolio_series[0]["value"]) / portfolio_series[0]["value"] * 100, 2)
+    bench_return_pct = 0.0
+    if len(bench_series) >= 2 and bench_series[0]["value"]:
+        bench_return_pct = round((bench_series[-1]["value"] - bench_series[0]["value"]) / bench_series[0]["value"] * 100, 2)
+
+    result = {
+        "portfolio": portfolio_series,
+        "benchmark": bench_series,
+        "total_return_pct": total_return_pct,
+        "benchmark_return_pct": bench_return_pct,
+    }
+    _perf_cache[cache_key] = (now, result)
+    return result
+
+
+@app.get("/api/portfolio/correlation")
+def get_portfolio_correlation(user: dict = Depends(get_optional_user)):
+    """NxN correlation matrix for holdings using 90-day price history."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    holdings, _ = _get_portfolio_holdings_with_prices(user["user_id"], repo)
+    tickers = [h["ticker"] for h in holdings]
+    if len(tickers) < 2:
+        return {"tickers": tickers, "matrix": [[1.0]] if tickers else [], "warnings": []}
+
+    try:
+        from stock_data import get_price_history as _gph
+        from scipy.stats import pearsonr as _pearsonr
+    except ImportError:
+        return {"tickers": tickers, "matrix": [], "warnings": [], "error": "scipy unavailable"}
+
+    price_maps: dict[str, dict[str, float]] = {}
+    for t in tickers:
+        hist = _gph(t, days=90)
+        price_maps[t] = {r["date"]: r["close"] for r in hist}
+
+    # Intersect dates
+    date_sets = [set(price_maps[t].keys()) for t in tickers]
+    common_dates = sorted(date_sets[0].intersection(*date_sets[1:]))
+    if len(common_dates) < 5:
+        return {"tickers": tickers, "matrix": [], "warnings": [], "error": "insufficient data"}
+
+    series: list[list[float]] = [[price_maps[t][d] for d in common_dates] for t in tickers]
+
+    n = len(tickers)
+    matrix: list[list[float]] = [[1.0] * n for _ in range(n)]
+    warnings: list[dict] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            try:
+                r, _ = _pearsonr(series[i], series[j])
+                r = round(float(r), 4)
+            except Exception:
+                r = 0.0
+            matrix[i][j] = r
+            matrix[j][i] = r
+            if r > 0.7:
+                warnings.append({
+                    "pair": [tickers[i], tickers[j]],
+                    "correlation": r,
+                    "severity": "high" if r > 0.85 else "medium",
+                })
+
+    return {"tickers": tickers, "matrix": matrix, "warnings": warnings}
+
+
+@app.get("/api/portfolio/concentration")
+def get_portfolio_concentration(user: dict = Depends(get_optional_user)):
+    """Concentration risk: top3_pct, sector HHI, single-stock warnings."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    holdings, total_value = _get_portfolio_holdings_with_prices(user["user_id"], repo)
+    if not holdings or total_value == 0:
+        return {"top3_pct": 0.0, "top3_warning": False, "sector_hhi": 0.0, "sector_concentrated": False, "single_stock_warnings": []}
+
+    sorted_holdings = sorted(holdings, key=lambda h: h.get("current_value", 0), reverse=True)
+    top3_value = sum(h.get("current_value", 0) for h in sorted_holdings[:3])
+    top3_pct = round(top3_value / total_value, 4)
+
+    single_stock_warnings = []
+    sector_values: dict[str, float] = {}
+    for h in holdings:
+        sym = (h.get("ticker") or "").upper()
+        pct = h.get("current_value", 0) / total_value
+        if pct > 0.25:
+            single_stock_warnings.append({"ticker": sym, "pct": round(pct, 4)})
+        sector = SECTOR_MAP.get(sym, "Other")
+        sector_values[sector] = sector_values.get(sector, 0) + h.get("current_value", 0)
+
+    # HHI: sum of squared market shares (in %, so range 0-10000)
+    hhi = sum((v / total_value * 100) ** 2 for v in sector_values.values())
+    hhi = round(hhi, 2)
+
+    return {
+        "top3_pct": top3_pct,
+        "top3_warning": top3_pct > 0.60,
+        "sector_hhi": hhi,
+        "sector_concentrated": hhi > 2500,
+        "single_stock_warnings": single_stock_warnings,
+    }
+
+
+@app.post("/api/portfolio/import")
+async def import_portfolio_csv(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_optional_user),
+):
+    """CSV import: columns ticker,shares (max 1000 rows)."""
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    content = await file.read()
+    try:
+        csv_text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        csv_text = content.decode("latin-1", errors="replace")
+
+    portfolio = repo.get_portfolio_by_user(user["user_id"])
+    if portfolio is None:
+        pid = str(uuid.uuid4())
+        repo.create_portfolio({
+            "id": pid,
+            "user_id": user["user_id"],
+            "name": "My Portfolio",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        portfolio = {"id": pid}
+
+    import csv as _csv
+    import io as _io
+    reader = _csv.DictReader(_io.StringIO(csv_text))
+    imported = 0
+    errors: list[dict] = []
+    row_num = 0
+    for row in reader:
+        row_num += 1
+        if imported >= 1000:
+            errors.append({"row": row_num, "error": "Import capped at 1000 rows"})
+            break
+        try:
+            ticker = row.get("ticker", "").strip().upper()
+            shares = float(row.get("shares", 0) or 0)
+            cost_basis_raw = row.get("cost_basis", "").strip()
+            cost_basis = float(cost_basis_raw) if cost_basis_raw else None
+            if not ticker or shares <= 0:
+                errors.append({"row": row_num, "error": f"Invalid ticker or shares: {ticker},{shares}"})
+                continue
+            holding_id = str(uuid.uuid4())
+            repo.add_portfolio_holding({
+                "id": holding_id,
+                "portfolio_id": portfolio["id"],
+                "ticker": ticker,
+                "shares": shares,
+                "cost_basis": cost_basis,
+                "added_at": datetime.now(timezone.utc).isoformat(),
+            })
+            imported += 1
+        except Exception as exc:
+            errors.append({"row": row_num, "error": str(exc)})
+    if imported > 0:
+        repo.update_portfolio_timestamp(portfolio["id"])
+    return {"imported": imported, "errors": errors}
+
+
 # --- 2.4: Story timeline endpoints ---
 
 @app.get("/api/narratives/{narrative_id}/timeline")
-def get_narrative_timeline(narrative_id: str, days: int = 30):
+def get_narrative_timeline(narrative_id: str = FPath(..., max_length=50), days: int = 30, user: dict = Depends(get_optional_user)):
     """Returns daily snapshots + mutations as a unified timeline."""
     days = max(1, min(days, 365))
     repo = get_repo()
@@ -3585,7 +4730,13 @@ def get_narrative_timeline(narrative_id: str, days: int = 30):
 
 
 @app.get("/api/narratives/{narrative_id}/changelog")
-def get_narrative_changelog(narrative_id: str, days: int = 30):
+def get_narrative_changelog(
+    narrative_id: str = FPath(..., max_length=50),
+    days: int = 30,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user: dict = Depends(get_optional_user),
+):
     """Returns enriched mutation events as a changelog for audit/trust."""
     days = max(1, min(days, 365))
     repo = get_repo()
@@ -3595,7 +4746,8 @@ def get_narrative_changelog(narrative_id: str, days: int = 30):
     if n is None:
         raise HTTPException(status_code=404, detail="Narrative not found")
 
-    mutations = repo.get_changelog_for_narrative(narrative_id, days=days)
+    total = repo.count_changelog_for_narrative(narrative_id, days=days)
+    mutations = repo.get_changelog_for_narrative(narrative_id, days=days, limit=limit, offset=offset)
 
     entries = []
     for m in mutations:
@@ -3623,13 +4775,15 @@ def get_narrative_changelog(narrative_id: str, days: int = 30):
         "narrative_id": narrative_id,
         "narrative_name": n.get("name") or "",
         "days": days,
-        "total_changes": len(entries),
+        "total_changes": total,
+        "limit": limit,
+        "offset": offset,
         "changelog": entries,
     }
 
 
 @app.get("/api/narratives/{narrative_id}/compare")
-def compare_narrative_snapshots(narrative_id: str, date1: str, date2: str):
+def compare_narrative_snapshots(narrative_id: str = FPath(..., max_length=50), date1: str = Query(...), date2: str = Query(...), user: dict = Depends(get_optional_user)):
     """Side-by-side comparison of two snapshots."""
     repo = get_repo()
     if repo is None:
@@ -3666,7 +4820,7 @@ def compare_narrative_snapshots(narrative_id: str, date1: str, date2: str):
 # ===========================================================================
 
 @app.get("/api/earnings/upcoming")
-def get_upcoming_earnings(days: int = 14):
+def get_upcoming_earnings(days: int = 14, user: dict = Depends(get_optional_user)):
     """Returns upcoming earnings dates for linked tickers."""
     days = max(1, min(days, 365))
     repo = get_repo()
@@ -3687,7 +4841,7 @@ def get_upcoming_earnings(days: int = 14):
             results = [r for r in results if r.get("days_until") is None or r["days_until"] <= days]
         return results
     except Exception as e:
-        logger.error("Failed to fetch earnings calendar: %s", e)
+        print(f"[Earnings] Failed to fetch earnings calendar: {e}")
         return []
 
 
@@ -3697,7 +4851,9 @@ def get_upcoming_earnings(days: int = 14):
 
 
 @app.get("/api/analytics/narrative-histories")
-def get_narrative_histories(days: int = 30):
+@limiter.limit("10/minute")
+@_timeout()
+def get_narrative_histories(request: Request, days: int = 30, user: dict = Depends(get_optional_user)):
     """Bulk narrative histories with gap backfill. Uses days as calendar date range."""
     days = max(1, min(days, 365))
     from datetime import date, timedelta
@@ -3768,7 +4924,9 @@ def get_narrative_histories(days: int = 30):
 
 
 @app.get("/api/analytics/momentum-leaderboard")
-def get_momentum_leaderboard(days: int = 7):
+@limiter.limit("10/minute")
+@_timeout()
+def get_momentum_leaderboard(request: Request, days: int = 7, user: dict = Depends(get_optional_user)):
     """Narratives ranked by momentum score (velocity trend via linear regression)."""
     from datetime import date, timedelta
     from scipy.stats import linregress
@@ -3844,7 +5002,9 @@ def get_momentum_leaderboard(days: int = 7):
 
 
 @app.get("/api/analytics/narrative-overlap")
-def get_narrative_overlap(days: int = 30):
+@limiter.limit("10/minute")
+@_timeout()
+def get_narrative_overlap(request: Request, days: int = 30, user: dict = Depends(get_optional_user)):
     """NxN overlap matrix (doc + asset + topic) for active narratives. Cached 4h."""
     days = max(1, min(days, 365))
     import time as _time
@@ -3965,7 +5125,9 @@ def get_narrative_overlap(days: int = 30):
 
 
 @app.get("/api/analytics/sector-convergence")
-def get_sector_convergence(days: int = 30):
+@limiter.limit("10/minute")
+@_timeout()
+def get_sector_convergence(request: Request, days: int = 30, user: dict = Depends(get_optional_user)):
     """Per-sector narrative pressure aggregation via linked assets."""
     days = max(1, min(days, 365))
     repo = get_repo()
@@ -4071,7 +5233,9 @@ _STAGE_IDX = {s: i for i, s in enumerate(_STAGE_ORDER)}
 
 
 @app.get("/api/analytics/lifecycle-funnel")
-def get_lifecycle_funnel(days: int = 30):
+@limiter.limit("10/minute")
+@_timeout()
+def get_lifecycle_funnel(request: Request, days: int = 30, user: dict = Depends(get_optional_user)):
     """Stage transition funnel from mutation_events."""
     days = max(1, min(days, 365))
     from collections import defaultdict
@@ -4188,7 +5352,8 @@ def get_lifecycle_funnel(days: int = 30):
 
 
 @app.get("/api/analytics/lead-time-distribution")
-def get_lead_time_distribution(days: int = 90, threshold: float = 2.0):
+@limiter.limit("10/minute")
+def get_lead_time_distribution(request: Request, days: int = 90, threshold: float = 2.0, user: dict = Depends(get_optional_user)):
     """Pre-computed lead time distribution. Served from background cache."""
     days = max(1, min(days, 365))
     import time as _time
@@ -4226,7 +5391,8 @@ def get_lead_time_distribution(days: int = 90, threshold: float = 2.0):
 
 
 @app.get("/api/analytics/contrarian-signals")
-def get_contrarian_signals(days: int = 30):
+@limiter.limit("10/minute")
+def get_contrarian_signals(request: Request, days: int = 30, user: dict = Depends(get_optional_user)):
     """Coordination-flagged narratives with price enrichment. From background cache."""
     import time as _time
     days = max(1, min(days, 365))
@@ -4263,7 +5429,8 @@ def get_contrarian_signals(days: int = 30):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/narratives/{narrative_id}/analyze")
-def analyze_narrative(narrative_id: str, force: bool = False):
+@limiter.limit("5/minute")
+def analyze_narrative(request: Request, narrative_id: str = FPath(..., max_length=50), force: bool = False, user: dict = Depends(get_optional_user)):
     """AI deep analysis of a narrative via Haiku. Cached for 6 hours."""
     repo = get_repo()
     if repo is None:
@@ -4397,10 +5564,12 @@ def analyze_narrative(narrative_id: str, force: bool = False):
     fallback_json = '{"thesis":"Analysis unavailable","key_drivers":[],"asset_impact":[],"risk_factors":[],"historical_comparison":null}'
     try:
         from settings import Settings
-        from llm_client import LlmClient
+        from llm_client import LlmClient, BudgetExceededError
         settings = Settings()
         llm = LlmClient(settings, repo)
-        result_text = llm.call_haiku("deep_analysis", narrative_id, prompt)
+        result_text = llm.call_haiku("deep_analysis", narrative_id, prompt, max_tokens=1024)
+    except BudgetExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except Exception:
         result_text = fallback_json
 
@@ -4433,3 +5602,189 @@ def analyze_narrative(narrative_id: str, force: bool = False):
         pass
 
     return {**result, "analyzed_at": analyzed_at, "cached": False}
+
+
+# ---------------------------------------------------------------------------
+# Part C — Social Sentiment System endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sentiment/market")
+async def get_market_sentiment(user: dict = Depends(get_current_user)):
+    """Market-wide sentiment gauge across all tracked securities."""
+    tickers = [s["symbol"] for s in TRACKED_SECURITIES]
+    if _sentiment_aggregator is None:
+        return {
+            "market_score": 0.0,
+            "bullish_pct": 0.0,
+            "bearish_pct": 0.0,
+            "neutral_pct": 100.0,
+            "top_bullish": [],
+            "top_bearish": [],
+            "spikes": [],
+        }
+    try:
+        return _sentiment_aggregator.compute_market_sentiment(tickers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sentiment/{ticker}/history")
+async def get_sentiment_history(
+    ticker: str = FPath(..., max_length=20, pattern=r"^[A-Z0-9.\-]{1,20}$"),
+    hours: int = Query(default=168, ge=1, le=8760),
+    user: dict = Depends(get_current_user),
+):
+    """Sentiment timeseries for a ticker (default 7 days)."""
+    repo = get_repo()
+    try:
+        rows = repo.get_sentiment_timeseries(ticker, hours=hours)
+        return {"ticker": ticker, "hours": hours, "data": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sentiment/{ticker}")
+async def get_ticker_sentiment(
+    ticker: str = FPath(..., max_length=20, pattern=r"^[A-Z0-9.\-]{1,20}$"),
+    user: dict = Depends(get_current_user),
+):
+    """Per-ticker composite sentiment with source breakdown."""
+    repo = get_repo()
+
+    if _sentiment_aggregator is not None:
+        try:
+            result = _sentiment_aggregator.compute_ticker_sentiment(ticker)
+            try:
+                repo.insert_sentiment_record(ticker, result)
+            except Exception:
+                pass
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Fallback: return persisted latest if aggregator not yet ready
+    try:
+        latest = repo.get_latest_sentiment(ticker)
+        if latest:
+            return latest
+    except Exception:
+        pass
+
+    return {
+        "ticker": ticker,
+        "composite_score": 0.0,
+        "news_component": 0.0,
+        "social_component": 0.0,
+        "momentum_component": 0.0,
+        "message_volume_24h": 0,
+        "sources": {},
+        "spike_detected": False,
+        "computed_at": None,
+    }
+
+
+@app.get("/api/social/trending")
+async def get_trending_tickers(
+    hours: int = Query(default=24, ge=1, le=168),
+    limit: int = Query(default=10, ge=1, le=50),
+    user: dict = Depends(get_current_user),
+):
+    """Top tickers by social mention volume in the last N hours."""
+    repo = get_repo()
+    try:
+        rows = repo.get_trending_tickers(hours=hours, limit=limit)
+        return {"hours": hours, "tickers": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/{ticker}")
+async def get_social_detail(
+    ticker: str = FPath(..., max_length=20, pattern=r"^[A-Z0-9.\-]{1,20}$"),
+    user: dict = Depends(get_current_user),
+):
+    """Social sentiment detail for a ticker with source breakdown."""
+    repo = get_repo()
+
+    stocktwits_data = _stocktwits_adapter.get_sentiment(ticker)
+    if stocktwits_data:
+        try:
+            repo.insert_social_mention(ticker, "stocktwits", {
+                "mention_count": stocktwits_data.get("total_messages", 0),
+                "bullish_count": stocktwits_data.get("bullish_count", 0),
+                "bearish_count": stocktwits_data.get("bearish_count", 0),
+            })
+        except Exception:
+            pass
+
+    signal_component: dict | None = None
+    try:
+        all_signals = repo.get_all_narrative_signals()
+        ticker_sigs = []
+        for sig in all_signals:
+            nar = repo.get_narrative(sig["narrative_id"])
+            if not nar:
+                continue
+            la_raw = nar.get("linked_assets", "[]")
+            try:
+                la = json.loads(la_raw) if isinstance(la_raw, str) else (la_raw or [])
+            except Exception:
+                continue
+            if any(a.get("ticker") == ticker for a in la if isinstance(a, dict)):
+                ticker_sigs.append({
+                    "narrative_id": sig["narrative_id"],
+                    "name": nar.get("name"),
+                    "direction": sig.get("direction"),
+                    "confidence": sig.get("confidence"),
+                })
+        signal_component = {"count": len(ticker_sigs), "signals": ticker_sigs[:10]}
+    except Exception:
+        pass
+
+    return {
+        "ticker": ticker,
+        "stocktwits": stocktwits_data,
+        "narrative_signals": signal_component,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dashboard layout endpoints (Phase 7)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_DASHBOARD_LAYOUT = {
+    "widgets": [
+        {"id": "narrative_radar", "type": "narrative_radar", "title": "Narrative Radar"},
+        {"id": "signal_leaderboard", "type": "signal_leaderboard", "title": "Signal Leaderboard"},
+        {"id": "top_movers", "type": "top_movers", "title": "Top Movers"},
+        {"id": "sentiment_meter", "type": "sentiment_meter", "title": "Sentiment Meter"},
+        {"id": "alert_feed", "type": "alert_feed", "title": "Alert Feed"},
+    ],
+    "grid": {
+        "lg": [
+            {"i": "narrative_radar", "x": 0, "y": 0, "w": 8, "h": 4},
+            {"i": "signal_leaderboard", "x": 8, "y": 0, "w": 4, "h": 4},
+            {"i": "top_movers", "x": 0, "y": 4, "w": 4, "h": 3},
+            {"i": "sentiment_meter", "x": 4, "y": 4, "w": 4, "h": 3},
+            {"i": "alert_feed", "x": 8, "y": 4, "w": 4, "h": 3},
+        ]
+    },
+}
+
+
+@app.get("/api/dashboard/layout")
+async def get_dashboard_layout(user: dict = Depends(get_current_user)):
+    """Return saved dashboard layout or default for new user."""
+    repo = get_repo()
+    saved = repo.get_dashboard_layout(user["user_id"])
+    if saved is not None:
+        return saved
+    return _DEFAULT_DASHBOARD_LAYOUT
+
+
+@app.put("/api/dashboard/layout")
+async def save_dashboard_layout(layout: dict, user: dict = Depends(get_current_user)):
+    """Save user's dashboard layout."""
+    repo = get_repo()
+    repo.save_dashboard_layout(user["user_id"], layout)
+    return {"status": "ok"}

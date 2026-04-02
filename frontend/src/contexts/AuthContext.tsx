@@ -1,13 +1,15 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { setApiToken } from "@/lib/api";
 
+const STUB_TOKEN = "stub-auth-token";
 const STORAGE_KEY = "auth_token";
 
 type AuthContextValue = {
   isSignedIn: boolean;
   token: string | null;
-  signIn: (token: string) => void;
+  signIn: () => void;
   signOut: () => void;
 };
 
@@ -20,33 +22,66 @@ export const AuthContext = createContext<AuthContextValue>({
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
+  const [checked, setChecked] = useState(false);
 
+  // H7: Check auth via /api/auth/me on mount (cookie-based)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) setToken(stored);
-    } catch {
-      /* localStorage unavailable */
-    }
+    fetch("/api/auth/me", { credentials: "include" })
+      .then((res) => {
+        if (res.ok) return res.json();
+        return null;
+      })
+      .then((data) => {
+        if (data) {
+          // Server confirms we are authenticated — set a marker token
+          // For stub mode, use the stub token; for JWT mode, use a sentinel
+          // since the actual JWT is now in an HttpOnly cookie
+          const effectiveToken = data.auth_mode === "stub" ? STUB_TOKEN : "cookie-auth";
+          setToken(effectiveToken);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setChecked(true));
   }, []);
 
-  function signIn(authToken: string) {
-    try {
-      localStorage.setItem(STORAGE_KEY, authToken);
-    } catch {
-      /* ignore */
+  // Backward compat: also check localStorage for stub mode
+  useEffect(() => {
+    if (checked && token === null) {
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored === STUB_TOKEN) setToken(stored);
+      } catch {
+        // localStorage unavailable (SSR or privacy mode)
+      }
     }
-    setToken(authToken);
-  }
+  }, [checked, token]);
 
-  function signOut() {
+  // Sync token to the API module for automatic header injection
+  useEffect(() => {
+    setApiToken(token);
+  }, [token]);
+
+  const signIn = useCallback(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, STUB_TOKEN);
+    } catch {
+      // ignore
+    }
+    setToken(STUB_TOKEN);
+  }, []);
+
+  const signOut = useCallback(() => {
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
-      /* ignore */
+      // ignore
     }
+    // H7: Call logout endpoint to clear HttpOnly cookie
+    fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(
+      () => {}
+    );
     setToken(null);
-  }
+  }, []);
 
   return (
     <AuthContext.Provider value={{ isSignedIn: token !== null, token, signIn, signOut }}>

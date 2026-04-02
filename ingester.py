@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import uuid
+import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -58,7 +59,7 @@ def _extract_domain(url: str) -> str:
 # Financial relevance filter
 # ---------------------------------------------------------------------------
 
-_FINANCIAL_KEYWORDS: frozenset[str] = frozenset([
+_TIER1_FINANCIAL: frozenset[str] = frozenset([
     # Markets & instruments
     "market", "stock", "share", "equity", "bond", "yield", "etf", "index",
     "futures", "options", "derivative", "commodity", "currency", "forex",
@@ -79,16 +80,26 @@ _FINANCIAL_KEYWORDS: frozenset[str] = frozenset([
     "housing", "mortgage", "real estate", "reit",
     "manufacturing", "supply chain", "logistics",
     "unemployment", "jobs", "labor", "wage",
-    # Geopolitical (market-moving)
+])
+
+_TIER2_GEOPOLITICAL: frozenset[str] = frozenset([
     "war", "conflict", "military", "sanction", "geopolit", "crisis",
     "strait", "blockade", "escalat",
 ])
 
+# Full set preserved for backward compatibility
+_FINANCIAL_KEYWORDS: frozenset[str] = _TIER1_FINANCIAL | _TIER2_GEOPOLITICAL
 
-def _is_financially_relevant(text: str) -> bool:
-    """Return True if the text contains at least one financial signal keyword."""
+
+def is_financially_relevant(text: str) -> bool:
+    """Return True if the text contains a Tier 1 financial keyword, or a Tier 2
+    keyword co-occurring with a Tier 1 keyword. Tier 2-only articles are rejected."""
     lower = text.lower()
-    return any(kw in lower for kw in _FINANCIAL_KEYWORDS)
+    has_tier1 = any(kw in lower for kw in _TIER1_FINANCIAL)
+    if has_tier1:
+        return True
+    # Tier 2 alone is not enough
+    return False
 
 
 def _backoff_seconds(retry_count: int) -> int:
@@ -267,22 +278,49 @@ class RssIngester(Ingester):
         ingested_at = datetime.now(timezone.utc).isoformat()
 
         for feed_url in self._feed_urls:
-            parsed_url = urlparse(feed_url)
-            if parsed_url.scheme not in ("http", "https"):
-                logger.warning("Rejecting non-HTTP feed URL: %s", feed_url)
-                continue
-
             if not can_fetch(feed_url, self._repository):
                 logger.info("robots.txt disallows %s — skipping feed", feed_url)
                 continue
+
+            # Conditional HTTP: check stored metadata for adaptive polling
+            feed_meta = self._repository.get_feed_metadata(feed_url)
+            if feed_meta:
+                empty_cycles = feed_meta.get("consecutive_empty_cycles") or 0
+                last_fetched = feed_meta.get("last_fetched_at")
+                if empty_cycles >= 3 and last_fetched:
+                    try:
+                        fetched_dt = datetime.fromisoformat(last_fetched)
+                        if datetime.now(timezone.utc) - fetched_dt < timedelta(hours=12):
+                            logger.debug("Skipping stale feed (empty %d cycles): %s", empty_cycles, feed_url)
+                            continue
+                    except (ValueError, TypeError):
+                        pass
 
             try:
                 req = urllib.request.Request(
                     feed_url,
                     headers={"User-Agent": "NarrativeIntelligenceBot/1.0"},
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    feed_bytes = resp.read(10 * 1024 * 1024)
+                # Add conditional HTTP headers
+                if feed_meta:
+                    if feed_meta.get("etag"):
+                        req.add_header("If-None-Match", feed_meta["etag"])
+                    if feed_meta.get("last_modified"):
+                        req.add_header("If-Modified-Since", feed_meta["last_modified"])
+
+                resp_etag = None
+                resp_last_modified = None
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        feed_bytes = resp.read(10 * 1024 * 1024)  # 10 MB cap
+                        resp_etag = resp.headers.get("ETag")
+                        resp_last_modified = resp.headers.get("Last-Modified")
+                except urllib.error.HTTPError as http_err:
+                    if http_err.code == 304:
+                        logger.debug("304 Not Modified for %s", feed_url)
+                        continue  # conditional HTTP working — no metadata update needed
+                    raise
+
                 parsed = feedparser.parse(feed_bytes)
             except Exception as exc:
                 logger.error("feedparser raised for %s: %s", feed_url, exc)
@@ -302,6 +340,8 @@ class RssIngester(Ingester):
                     getattr(parsed, "bozo_exception", ""),
                 )
 
+            pre_feed_count = len(docs)
+
             for entry in parsed.entries:
                 link = entry.get("link", "")
                 if not link:
@@ -311,11 +351,23 @@ class RssIngester(Ingester):
                 if not raw_text.strip():
                     continue
 
-                if not _is_financially_relevant(raw_text):
+                source_domain = _extract_domain(link)
+
+                # Enrich short excerpts (paywalled/headline-only sources) with
+                # domain + category metadata so embeddings have more signal.
+                if len(raw_text) < 200:
+                    title = entry.get("title", "")
+                    tags_list = entry.get("tags") or []
+                    section = tags_list[0].get("term", "") if tags_list else ""
+                    parts = [source_domain]
+                    if section:
+                        parts.append(section)
+                    parts.append(title or raw_text)
+                    raw_text = ": ".join(parts)
+
+                if not is_financially_relevant(raw_text):
                     logger.debug("Skipping non-financial article: %.80s", raw_text)
                     continue
-
-                source_domain = _extract_domain(link)
                 published_at = _parse_published_at(entry, ingested_at)
                 doc_id = str(uuid.uuid4())
 
@@ -330,6 +382,10 @@ class RssIngester(Ingester):
                     raw_text_hash=_compute_hash(raw_text),
                 )
                 docs.append(doc)
+
+            # Update feed metadata with conditional HTTP info
+            feed_doc_count = len(docs) - pre_feed_count
+            self._repository.upsert_feed_metadata(feed_url, resp_etag, resp_last_modified, feed_doc_count)
 
         return docs
 

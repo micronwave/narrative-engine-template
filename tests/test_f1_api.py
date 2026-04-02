@@ -5,7 +5,7 @@ Unit:
   F1-U1: compute_lifecycle_stage returns "Emerging" for brand-new narrative
   F1-U2: compute_lifecycle_stage returns "Growing" when doc_count >= 8 and velocity > 0.05
   F1-U3: compute_lifecycle_stage returns "Mature" when days >= 5, entropy >= 1.5, docs >= 15
-  F1-U4: compute_lifecycle_stage returns "Declining" when consecutive_declining >= 3
+  F1-U4: compute_lifecycle_stage returns "Declining" when consecutive_declining >= 5 or velocity < 0.01
   F1-U5: compute_lifecycle_stage returns "Dormant" when declining >= 7 and velocity < 0.01
   F1-U6: Revival — Declining + velocity > 0.10 returns "Growing"
   F1-U7: Cannot skip stages — Emerging with high entropy still returns "Growing" not "Mature"
@@ -33,7 +33,7 @@ def S(section: str):
 
 def T(name: str, condition: bool, details: str = ""):
     _results.append((name, condition))
-    marker = "✓" if condition else "✗"
+    marker = "\u2713" if condition else "\u2717"
     msg = f"  [{marker}] {name}"
     if details and not condition:
         msg += f"\n      details: {details}"
@@ -55,10 +55,11 @@ T("returns Emerging", result == "Emerging", f"got {result}")
 # ===========================================================================
 # F1-U2: Growing when doc_count >= 8 and velocity > 0.05
 # ===========================================================================
-S("F1-U2: Emerging → Growing")
+S("F1-U2: Emerging \u2192 Growing")
 result = compute_lifecycle_stage(
     current_stage="Emerging", document_count=10, velocity_windowed=0.08,
     entropy=0.5, consecutive_declining_days=0, days_since_creation=3,
+    cycles_in_current_stage=3,
 )
 T("returns Growing", result == "Growing", f"got {result}")
 
@@ -79,10 +80,11 @@ T("stays Emerging with low doc count", result3 == "Emerging", f"got {result3}")
 # ===========================================================================
 # F1-U3: Mature when days >= 5, entropy >= 1.5, docs >= 15
 # ===========================================================================
-S("F1-U3: Growing → Mature")
+S("F1-U3: Growing \u2192 Mature")
 result = compute_lifecycle_stage(
     current_stage="Growing", document_count=20, velocity_windowed=0.06,
     entropy=2.0, consecutive_declining_days=0, days_since_creation=7,
+    cycles_in_current_stage=3,
 )
 T("returns Mature", result == "Mature", f"got {result}")
 
@@ -96,26 +98,29 @@ T("stays Growing with low entropy", result2 == "Growing", f"got {result2}")
 # ===========================================================================
 # F1-U4: Declining when consecutive_declining >= 3
 # ===========================================================================
-S("F1-U4: Mature → Declining")
+S("F1-U4: Mature \u2192 Declining")
 result = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.05,
-    entropy=2.0, consecutive_declining_days=4, days_since_creation=10,
+    entropy=2.0, consecutive_declining_days=6, days_since_creation=10,
+    cycles_in_current_stage=3,
 )
-T("returns Declining (consecutive >= 3)", result == "Declining", f"got {result}")
+T("returns Declining (consecutive >= 5)", result == "Declining", f"got {result}")
 
 result2 = compute_lifecycle_stage(
-    current_stage="Mature", document_count=20, velocity_windowed=0.01,
+    current_stage="Mature", document_count=20, velocity_windowed=0.005,
     entropy=2.0, consecutive_declining_days=0, days_since_creation=10,
+    cycles_in_current_stage=3,
 )
-T("returns Declining (velocity < 0.02)", result2 == "Declining", f"got {result2}")
+T("returns Declining (velocity < 0.01)", result2 == "Declining", f"got {result2}")
 
 # ===========================================================================
 # F1-U5: Dormant when declining >= 7 and velocity < 0.01
 # ===========================================================================
-S("F1-U5: Declining → Dormant")
+S("F1-U5: Declining \u2192 Dormant")
 result = compute_lifecycle_stage(
     current_stage="Declining", document_count=20, velocity_windowed=0.005,
     entropy=2.0, consecutive_declining_days=8, days_since_creation=20,
+    cycles_in_current_stage=3,
 )
 T("returns Dormant", result == "Dormant", f"got {result}")
 
@@ -149,8 +154,9 @@ S("F1-U7: Cannot skip stages")
 result = compute_lifecycle_stage(
     current_stage="Emerging", document_count=50, velocity_windowed=0.20,
     entropy=3.0, consecutive_declining_days=0, days_since_creation=30,
+    cycles_in_current_stage=3,
 )
-T("Emerging → Growing (not Mature)", result == "Growing", f"got {result}")
+T("Emerging \u2192 Growing (not Mature)", result == "Growing", f"got {result}")
 
 # ===========================================================================
 # F1-U8: GET /api/narratives includes stage field
@@ -189,7 +195,7 @@ if passed < total:
     print("\nFailed tests:")
     for name, ok in _results:
         if not ok:
-            print(f"  ✗ {name}")
+            print(f"  \u2717 {name}")
     sys.exit(1)
 else:
     print("All F1 tests passed.")

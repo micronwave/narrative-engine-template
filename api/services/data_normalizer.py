@@ -8,6 +8,9 @@ When you add or swap a data provider, you only touch the adapter, never the cons
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+# Shared executor — prevents per-call thread pool creation (C3 hardening)
+_BATCH_EXECUTOR = ThreadPoolExecutor(max_workers=5)
 from datetime import datetime
 from typing import Optional
 
@@ -56,12 +59,13 @@ class DataNormalizer:
         "CoinGeckoAdapter": "coingecko",
     }
 
-    def __init__(self, adapters: list):
+    def __init__(self, adapters: list, repository=None):
         from circuit_breaker import CircuitBreaker
 
         self._adapters = adapters
         self._adapters_by_name: dict = {}
         self._breakers: dict = {}
+        self._repository = repository
         for adapter in adapters:
             cls_name = type(adapter).__name__
             name = self._CLASS_NAME_TO_KEY.get(
@@ -85,7 +89,7 @@ class DataNormalizer:
         return ordered
 
     def get_quote(
-        self, symbol: str, instrument_type: str = "equity"
+        self, symbol: str, instrument_type: str = "equity", source: str = "unknown"
     ) -> Optional[NormalizedQuote]:
         for adapter in self._ordered_adapters(instrument_type):
             breaker = self._breakers.get(id(adapter))
@@ -96,17 +100,29 @@ class DataNormalizer:
                 if quote is not None:
                     if breaker:
                         breaker.record_success()
+                    if self._repository is not None:
+                        try:
+                            from datetime import date as _date
+                            adapter_name = self._CLASS_NAME_TO_KEY.get(
+                                type(adapter).__name__,
+                                type(adapter).__name__.lower().replace("adapter", ""),
+                            )
+                            self._repository.increment_api_usage(
+                                adapter_name, _date.today().isoformat(), 0
+                            )
+                        except Exception:
+                            pass
                     return quote
                 # None means "not found" — adapter is working, just doesn't cover
                 # this symbol. Do NOT touch the breaker.
             except Exception as e:
                 if breaker:
-                    breaker.record_failure()
+                    breaker.record_failure(source=source)
                 logger.warning(
                     "Adapter %s failed for %s: %s",
                     type(adapter).__name__,
                     symbol,
-                    e,
+                    type(e).__name__,
                 )
         return None
 
@@ -118,15 +134,14 @@ class DataNormalizer:
         def _fetch_one(symbol: str) -> tuple[str, Optional[NormalizedQuote]]:
             return symbol, self.get_quote(symbol, instrument_type)
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(_fetch_one, sym): sym for sym in symbols}
-            for future in futures:
-                sym = futures[future]
-                try:
-                    _, quote = future.result(timeout=15)
-                    results[sym] = quote
-                except (FuturesTimeout, Exception) as e:
-                    logger.warning("Batch fetch timeout/error for %s: %s", sym, e)
-                    results[sym] = None
+        futures = {_BATCH_EXECUTOR.submit(_fetch_one, sym): sym for sym in symbols}
+        for future in futures:
+            sym = futures[future]
+            try:
+                _, quote = future.result(timeout=15)
+                results[sym] = quote
+            except (FuturesTimeout, Exception) as e:
+                logger.warning("Batch fetch timeout/error for %s: %s", sym, e)
+                results[sym] = None
 
         return results

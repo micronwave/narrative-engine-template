@@ -11,7 +11,7 @@ The output is a pickle file at ASSET_LIBRARY_PATH (from settings):
 
 import argparse
 import logging
-import json as _json
+import pickle
 import re
 import sys
 from pathlib import Path
@@ -968,12 +968,8 @@ def build(download_dir: str | None = None) -> None:
     output_path = Path(settings.ASSET_LIBRARY_PATH)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    serializable = {
-        ticker: {"name": data["name"], "embedding": data["embedding"].tolist()}
-        for ticker, data in library.items()
-    }
-    with open(output_path, "w", encoding="utf-8") as f:
-        _json.dump(serializable, f)
+    with open(output_path, "wb") as f:
+        pickle.dump(library, f)
 
     logger.info(
         "Asset library saved: path=%s assets=%d failed=%d",

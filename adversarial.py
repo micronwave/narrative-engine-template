@@ -61,28 +61,22 @@ def check_coordination(
         return []
 
     # ------------------------------------------------------------------
-    # Use a temporary LSH index to find similar cross-domain pairs (O(n) vs O(n²)).
+    # Compute pairwise Jaccard similarity for cross-domain document pairs.
     # ------------------------------------------------------------------
-    from datasketch import MinHashLSH as _LSH
-
     n = len(docs_with_sigs)
     similarity_threshold = settings.LSH_THRESHOLD
-    temp_lsh = _LSH(threshold=similarity_threshold, num_perm=settings.LSH_NUM_PERM)
-    doc_index_map: dict[str, int] = {}
 
     similar_pairs: list[tuple[int, int]] = []
-    for i, doc in enumerate(docs_with_sigs):
-        sig = batch_signatures[doc.doc_id]
-        neighbors = temp_lsh.query(sig) if doc_index_map else []
-        for neighbor_id in neighbors:
-            j = doc_index_map[neighbor_id]
-            if doc.source_domain != docs_with_sigs[j].source_domain:
-                similar_pairs.append((j, i))
-        try:
-            temp_lsh.insert(doc.doc_id, sig)
-        except ValueError:
-            pass
-        doc_index_map[doc.doc_id] = i
+    for i in range(n):
+        doc_i = docs_with_sigs[i]
+        sig_i = batch_signatures[doc_i.doc_id]
+        for j in range(i + 1, n):
+            doc_j = docs_with_sigs[j]
+            if doc_i.source_domain == doc_j.source_domain:
+                continue  # Only flag cross-domain similarity.
+            sig_j = batch_signatures[doc_j.doc_id]
+            if sig_i.jaccard(sig_j) >= similarity_threshold:
+                similar_pairs.append((i, j))
 
     if not similar_pairs:
         return []

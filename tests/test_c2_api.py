@@ -10,12 +10,10 @@ Run with:
     python -X utf8 test_c2_api.py
 
 Exit code 0 if all tests pass, 1 if any fail.
-On all-pass, appends a line to frontend_build_log.
 """
 
 import logging
 import sys
-from datetime import date
 from pathlib import Path
 
 logging.basicConfig(

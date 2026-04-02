@@ -4,18 +4,51 @@ All sources are opt-in via settings keys and feature flags.
 Returns empty list silently when disabled or credentials absent.
 """
 
+import calendar
+import email.utils
 import hashlib
 import logging
 import uuid
 from datetime import date, datetime, timezone
+from urllib.parse import urlparse
 
 import requests
 
-from ingester import RawDocument
+from ingester import RawDocument, is_financially_relevant
 from repository import SqliteRepository
 from settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_pubdate(raw: str) -> str:
+    """Normalize a date string to UTC ISO8601. Mirrors ingester._parse_published_at logic."""
+    # Try ISO8601 with timezone
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).isoformat()
+        # No timezone — assume UTC
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    except (ValueError, TypeError):
+        pass
+    # Try RFC 2822 (email-style dates)
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        pass
+    # Try dateutil as last resort
+    try:
+        from dateutil.parser import parse as du_parse
+        dt = du_parse(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        pass
+    logger.warning("[NewsData] Could not parse pubDate %r; using current UTC", raw)
+    return datetime.now(timezone.utc).isoformat()
 
 
 class ApiUsageTracker:
@@ -58,25 +91,28 @@ class MarketauxIngester:
             }, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            self.tracker.increment("marketaux", self.settings.MARKETAUX_DAILY_LIMIT)
 
             docs = []
             for article in data.get("data", []):
                 text = f"{article.get('title', '')} {article.get('description', '')}".strip()
                 if not text:
                     continue
+                if not is_financially_relevant(text):
+                    continue
                 url = article.get("url", "")
                 doc_id = hashlib.sha256(url.encode()).hexdigest()[:16] if url else str(uuid.uuid4())
+                source = urlparse(url).netloc.replace("www.", "") if url else "marketaux.com"
                 docs.append(RawDocument(
                     doc_id=doc_id,
                     raw_text=text,
                     source_url=url,
-                    source_domain="marketaux.com",
+                    source_domain=source or "marketaux.com",
                     published_at=article.get("published_at", datetime.now(timezone.utc).isoformat()),
                     ingested_at=datetime.now(timezone.utc).isoformat(),
                     author=None,
                     raw_text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 ))
+            self.tracker.increment("marketaux", self.settings.MARKETAUX_DAILY_LIMIT)
             logger.info("[MarketAux] Ingested %d documents", len(docs))
             return docs
         except Exception as exc:
@@ -106,25 +142,29 @@ class NewsdataIngester:
             }, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            self.tracker.increment("newsdata", self.settings.NEWSDATA_DAILY_LIMIT)
 
             docs = []
             for article in data.get("results", []):
                 text = f"{article.get('title', '')} {article.get('content', '') or article.get('description', '')}".strip()
                 if not text:
                     continue
+                if not is_financially_relevant(text):
+                    continue
                 url = article.get("link", "")
                 doc_id = hashlib.sha256(url.encode()).hexdigest()[:16] if url else str(uuid.uuid4())
+                pub_raw = article.get("pubDate")
+                published_at = _normalize_pubdate(pub_raw) if pub_raw else datetime.now(timezone.utc).isoformat()
                 docs.append(RawDocument(
                     doc_id=doc_id,
                     raw_text=text,
                     source_url=url,
                     source_domain=article.get("source_id", "newsdata.io"),
-                    published_at=article.get("pubDate", datetime.now(timezone.utc).isoformat()),
+                    published_at=published_at,
                     ingested_at=datetime.now(timezone.utc).isoformat(),
                     author=None,
                     raw_text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 ))
+            self.tracker.increment("newsdata", self.settings.NEWSDATA_DAILY_LIMIT)
             logger.info("[NewsData] Ingested %d documents", len(docs))
             return docs
         except Exception as exc:
@@ -202,6 +242,19 @@ class ApiIngestionManager:
             NewsdataIngester(settings, repository),
             RedditIngester(settings, repository),
         ]
+        if settings.ENABLE_EDGAR and settings.EDGAR_EMAIL and settings.EDGAR_TICKERS:
+            tickers = [t.strip() for t in settings.EDGAR_TICKERS.split(",") if t.strip()]
+            if tickers:
+                from ingester import EdgarIngester
+                self._ingesters.append(EdgarIngester(
+                    repository,
+                    tickers=tickers,
+                    company_name=settings.EDGAR_COMPANY_NAME,
+                    email=settings.EDGAR_EMAIL,
+                ))
+                logger.info("[EDGAR] Wired EdgarIngester for %d tickers", len(tickers))
+            else:
+                logger.info("[EDGAR] ENABLE_EDGAR=True but EDGAR_TICKERS is empty — skipping")
 
     def ingest(self) -> list[RawDocument]:
         """Calls all ingesters and combines results."""

@@ -8,6 +8,7 @@ import { useWatchlist } from "@/contexts/WatchlistContext";
 import VelocitySparkline from "./VelocitySparkline";
 import MomentumBar from "./MomentumBar";
 import MiniAreaChart from "./MiniAreaChart";
+import SignalBadge from "./SignalBadge";
 
 type Props = {
   narrative: Narrative;
@@ -82,28 +83,6 @@ function DirectionArrow({ summary }: { summary: string }) {
   if (summary.startsWith("-"))
     return <ArrowDown size={14} style={{ color }} />;
   return <Minus size={12} style={{ color: "var(--text-disabled)" }} />;
-}
-
-/** LLM-extracted signal direction badge */
-function SignalDirectionBadge({ direction }: { direction?: string | null }) {
-  if (!direction || direction === "neutral") return null;
-  const isBullish = direction === "bullish";
-  const Icon = isBullish ? ArrowUp : ArrowDown;
-  return (
-    <span
-      data-testid="signal-direction"
-      className="flex items-center gap-0.5"
-      style={{
-        fontSize: 10,
-        fontFamily: "var(--font-mono)",
-        color: isBullish ? "var(--bullish)" : "var(--bearish)",
-        letterSpacing: "0.3px",
-      }}
-    >
-      <Icon size={10} />
-      {direction.toUpperCase()}
-    </span>
-  );
 }
 
 /** Catalyst type badge (earnings, regulatory, etc.) */
@@ -242,7 +221,7 @@ function HeroCard({
                 {narrative.stage.toLowerCase()}
               </span>
             )}
-            <SignalDirectionBadge direction={narrative.signal_direction} />
+            <SignalBadge direction={narrative.signal_direction} confidence={narrative.signal_confidence} />
             <CatalystTypeBadge type={narrative.signal_catalyst_type} />
             {narrative.topic_tags && narrative.topic_tags.length > 0 && (
               <div className="flex gap-2" data-testid="topic-tags">
@@ -467,7 +446,7 @@ function SecondaryCard({
 
       {/* Signal + topic labels */}
       <div className="flex items-center gap-2 mb-2 flex-wrap">
-        <SignalDirectionBadge direction={narrative.signal_direction} />
+        <SignalBadge direction={narrative.signal_direction} confidence={narrative.signal_confidence} />
         <CatalystTypeBadge type={narrative.signal_catalyst_type} />
         {narrative.topic_tags && narrative.topic_tags.length > 0 &&
           narrative.topic_tags.map((tag) => (
@@ -612,7 +591,7 @@ function CompactRow({
         </span>
       )}
 
-      <SignalDirectionBadge direction={narrative.signal_direction} />
+      <SignalBadge direction={narrative.signal_direction} confidence={narrative.signal_confidence} />
 
       {/* Topics */}
       {narrative.topic_tags && narrative.topic_tags.length > 0 && (

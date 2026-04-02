@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 
+from safe_pickle import safe_load
+
 import faiss
 import numpy as np
 
@@ -9,11 +11,34 @@ from embedding_model import EmbeddingModel
 
 logger = logging.getLogger(__name__)
 
+# Topic tag → set of relevant GICS sectors. Empty set means all sectors are valid.
+TOPIC_SECTOR_RELEVANCE: dict[str, set[str]] = {
+    "crypto": {"Crypto", "Technology", "Financials"},
+    "earnings": set(),
+    "regulatory": set(),
+    "geopolitical": {"Energy", "Industrials"},
+    "macro": set(),
+    "esg": {"Energy", "Utilities", "Industrials", "Materials"},
+    "m&a": set(),
+}
+
 
 class AssetMapper:
-    """Maps narratives to financial assets via embedding similarity."""
+    """
+    Maps narratives to financial assets via embedding similarity.
+    Zero LLM calls.
+    """
 
     def __init__(self, asset_library_path: str, embedder: EmbeddingModel) -> None:
+        """
+        Load and validate the asset library.
+
+        Raises FileNotFoundError if the asset library pickle is not found.
+        Raises ValueError if embedding dimension mismatches the pipeline embedder.
+
+        The library is a pickled dict: {ticker: {'name': str, 'embedding': np.ndarray}}
+        A FAISS IndexFlatIP is built in memory from the asset embeddings on init.
+        """
         path = Path(asset_library_path)
         if not path.exists():
             raise FileNotFoundError(
@@ -21,8 +46,14 @@ class AssetMapper:
                 "Run build_asset_library.py first."
             )
 
-        with open(path, "r", encoding="utf-8") as f:
-            library: dict = json.load(f)
+        library: dict = safe_load(str(path), allowed={
+            "builtins": {"dict", "list", "tuple", "str", "int", "float", "bool"},
+            "numpy": {"ndarray", "dtype", "float32", "float64"},
+            "numpy.core.multiarray": {"scalar", "_reconstruct"},
+            "numpy._core.multiarray": {"scalar", "_reconstruct"},
+            "numpy._core.numeric": {"_frombuffer"},
+            "numpy.core.numeric": {"_frombuffer"},
+        })
 
         pipeline_dim: int = embedder.dimension()
 
@@ -58,10 +89,15 @@ class AssetMapper:
         centroid: np.ndarray,
         top_k: int = 5,
         min_similarity: float = 0.50,
+        topic_tags: list[str] | None = None,
+        sector_map: dict[str, str] | None = None,
     ) -> list[dict]:
         """
         Find matching assets for a narrative centroid using cosine similarity
         (dot product on L2-normalized vectors).
+
+        If topic_tags specify a narrow domain and sector_map is provided,
+        tickers whose sector is irrelevant to the topic are suppressed.
 
         Returns: [{'ticker': str, 'asset_name': str, 'similarity_score': float}]
         Results are ordered by descending similarity and filtered to >= min_similarity.
@@ -77,6 +113,19 @@ class AssetMapper:
         k = min(top_k, self._index.ntotal)
         distances, indices = self._index.search(query, k)
 
+        # Determine allowed sectors from topic_tags
+        allowed_sectors: set[str] | None = None
+        if topic_tags and sector_map:
+            for tag in topic_tags:
+                tag_lower = tag.lower()
+                if tag_lower in TOPIC_SECTOR_RELEVANCE:
+                    relevant = TOPIC_SECTOR_RELEVANCE[tag_lower]
+                    if relevant:  # non-empty = narrow domain
+                        if allowed_sectors is None:
+                            allowed_sectors = set(relevant)
+                        else:
+                            allowed_sectors |= relevant
+
         results: list[dict] = []
         for dist, idx in zip(distances[0], indices[0]):
             if idx < 0:
@@ -84,9 +133,15 @@ class AssetMapper:
             sim = float(dist)
             if sim < min_similarity:
                 continue
+            ticker = self._tickers[idx]
+            # Sector validation: suppress irrelevant sectors for narrow topics
+            if allowed_sectors is not None and sector_map:
+                ticker_sector = sector_map.get(ticker)
+                if ticker_sector and ticker_sector not in allowed_sectors:
+                    continue
             results.append(
                 {
-                    "ticker": self._tickers[idx],
+                    "ticker": ticker,
                     "asset_name": self._names[idx],
                     "similarity_score": sim,
                 }

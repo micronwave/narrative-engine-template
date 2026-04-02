@@ -29,8 +29,14 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    def get_all_active_narratives(self) -> list[dict]:
-        """Get all non-suppressed narratives."""
+    def get_all_active_narratives(self, *, limit: int = 0, offset: int = 0,
+                                  stage: str | None = None, topic: str | None = None) -> list[dict]:
+        """Get all non-suppressed narratives. Optional stage/topic filters for API pagination."""
+        ...
+
+    @abstractmethod
+    def count_active_narratives(self, *, stage: str | None = None, topic: str | None = None) -> int:
+        """Count non-suppressed narratives, with optional filters."""
         ...
 
     @abstractmethod
@@ -115,7 +121,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    def get_centroid_history(self, narrative_id: str, days: int) -> list[dict]:
+    def get_centroid_history(self, narrative_id: str, days: int, *, limit: int = 0, offset: int = 0) -> list[dict]:
         """Get centroid history for a narrative, most recent first."""
         ...
 
@@ -144,6 +150,11 @@ class Repository(ABC):
     @abstractmethod
     def update_sonnet_daily_spend(self, date: str, tokens: int, calls: int) -> None:
         """Update or insert the daily spend record."""
+        ...
+
+    @abstractmethod
+    def get_daily_llm_spend(self) -> float:
+        """Get total LLM spend (all models) for today in USD."""
         ...
 
     # --- Adversarial Operations ---
@@ -267,7 +278,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    def get_changelog_for_narrative(self, narrative_id: str, days: int = 30) -> list[dict]:
+    def get_changelog_for_narrative(self, narrative_id: str, days: int = 30, *, limit: int = 0, offset: int = 0) -> list[dict]:
         """Get mutations for a narrative within the last N days, for changelog."""
         ...
 
@@ -279,7 +290,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    def get_document_evidence(self, narrative_id: str) -> list[dict]:
+    def get_document_evidence(self, narrative_id: str, *, limit: int = 0, offset: int = 0) -> list[dict]:
         """Get all evidence documents for a narrative."""
         ...
 
@@ -433,6 +444,21 @@ class Repository(ABC):
         """Check if a notification was already created today for this rule."""
         ...
 
+    @abstractmethod
+    def get_notifications_since(self, user_id: str, since: "datetime") -> list[dict]:
+        """Return notifications created after `since` for SSE delivery."""
+        ...
+
+    @abstractmethod
+    def get_dashboard_layout(self, user_id: str) -> dict | None:
+        """Return saved dashboard layout for user, or None."""
+        ...
+
+    @abstractmethod
+    def save_dashboard_layout(self, user_id: str, layout: dict) -> None:
+        """Upsert dashboard layout for user."""
+        ...
+
     # --- Support Operations ---
 
     @abstractmethod
@@ -480,6 +506,18 @@ class Repository(ABC):
     @abstractmethod
     def get_first_snapshot_dates(self) -> dict[str, str]:
         """Return {narrative_id: earliest_snapshot_date} for all narratives."""
+        ...
+
+    # --- Feed Metadata Operations ---
+
+    @abstractmethod
+    def get_feed_metadata(self, feed_url: str) -> dict | None:
+        """Return stored ETag/Last-Modified for a feed URL, or None."""
+        ...
+
+    @abstractmethod
+    def upsert_feed_metadata(self, feed_url: str, etag: str | None, last_modified: str | None, new_doc_count: int) -> None:
+        """Insert or update feed metadata. Tracks consecutive empty cycles."""
         ...
 
     # --- Price Tick / Candle Operations ---
@@ -600,6 +638,101 @@ class Repository(ABC):
     @abstractmethod
     def clear_ticker_convergences(self) -> None:
         """Delete all ticker convergence records (used before full recompute)."""
+        ...
+
+    # --- Impact Score Operations (Phase 6) ---
+
+    @abstractmethod
+    def upsert_impact_score(self, data: dict) -> None:
+        """Insert or replace a directional impact score for a narrative+ticker pair."""
+        ...
+
+    @abstractmethod
+    def get_impact_scores_for_narrative(self, narrative_id: str) -> list[dict]:
+        """Get all impact scores for a narrative."""
+        ...
+
+    @abstractmethod
+    def get_impact_scores_for_ticker(self, ticker: str) -> list[dict]:
+        """Get all impact scores for a ticker."""
+        ...
+
+    @abstractmethod
+    def get_top_impact_scores(self, limit: int = 20) -> list[dict]:
+        """Get top impact scores ordered by impact_score DESC."""
+        ...
+
+    # --- Token Blacklist Operations ---
+
+    @abstractmethod
+    def blacklist_token(self, jti: str, user_id: str, expires_at: str) -> None:
+        """Add a token's jti to the blacklist (for logout/revocation)."""
+        ...
+
+    @abstractmethod
+    def is_token_blacklisted(self, jti: str) -> bool:
+        """Check if a token jti has been revoked."""
+        ...
+
+    @abstractmethod
+    def cleanup_expired_blacklist(self) -> int:
+        """Remove expired entries from token_blacklist. Returns count deleted."""
+        ...
+
+    # --- Refresh Token Operations (M2) ---
+
+    @abstractmethod
+    def store_refresh_token(self, jti: str, user_id: str, expires_at: str) -> None:
+        """Store a new refresh token."""
+        ...
+
+    @abstractmethod
+    def get_refresh_token(self, jti: str) -> dict | None:
+        """Retrieve a refresh token by jti. Returns dict or None."""
+        ...
+
+    @abstractmethod
+    def revoke_refresh_token(self, jti: str) -> None:
+        """Mark a refresh token as revoked."""
+        ...
+
+    @abstractmethod
+    def revoke_all_user_refresh_tokens(self, user_id: str) -> int:
+        """Revoke all refresh tokens for a user. Returns count revoked."""
+        ...
+
+    # --- Auth Audit Logging (M9) ---
+
+    @abstractmethod
+    def log_auth_event(self, event: dict) -> None:
+        """Log an authentication event to auth_audit_log."""
+        ...
+
+    # --- Sentiment Timeseries Operations ---
+
+    @abstractmethod
+    def insert_sentiment_record(self, ticker: str, scores: dict) -> None:
+        """Insert a composite sentiment record for a ticker."""
+        ...
+
+    @abstractmethod
+    def get_sentiment_timeseries(self, ticker: str, hours: int = 168) -> list[dict]:
+        """Get sentiment timeseries for a ticker (default 7 days = 168h), newest first."""
+        ...
+
+    @abstractmethod
+    def get_latest_sentiment(self, ticker: str) -> dict | None:
+        """Get the most recent sentiment record for a ticker."""
+        ...
+
+    @abstractmethod
+    def insert_social_mention(self, ticker: str, source: str, counts: dict) -> None:
+        """Insert a social mention count record."""
+        ...
+
+    @abstractmethod
+    def get_trending_tickers(self, hours: int = 24, limit: int = 10) -> list[dict]:
+        """Get top tickers by social mention volume in the last N hours."""
         ...
 
 
@@ -739,8 +872,7 @@ class SqliteRepository(Repository):
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS pipeline_run_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL,
+                    run_id TEXT PRIMARY KEY,
                     step_number INTEGER,
                     step_name TEXT,
                     status TEXT,
@@ -1162,6 +1294,155 @@ class SqliteRepository(Repository):
                 except Exception:
                     pass
 
+            # Phase 4 Signal Redesign: catalyst anchoring columns on narratives
+            for col, coltype in [
+                ("catalyst_proximity_score", "REAL DEFAULT NULL"),
+                ("days_to_catalyst", "INTEGER DEFAULT NULL"),
+                ("catalyst_type", "TEXT DEFAULT NULL"),
+                ("macro_alignment", "REAL DEFAULT NULL"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE narratives ADD COLUMN {col} {coltype}")
+                except Exception:
+                    pass
+
+            # Phase 5 Signal Redesign: inflow velocity columns on narratives
+            for col, coltype in [
+                ("inflow_velocity", "REAL DEFAULT NULL"),
+                ("avg_docs_per_cycle_7d", "REAL DEFAULT NULL"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE narratives ADD COLUMN {col} {coltype}")
+                except Exception:
+                    pass
+
+            # Foundation Fix 1: hysteresis cycle counter
+            try:
+                conn.execute("ALTER TABLE narratives ADD COLUMN cycles_in_current_stage INTEGER DEFAULT 0")
+            except Exception:
+                pass
+
+            # Foundation Fix 3: conditional HTTP for RSS feeds
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS feed_metadata (
+                    feed_url TEXT PRIMARY KEY,
+                    etag TEXT,
+                    last_modified TEXT,
+                    last_fetched_at TEXT,
+                    consecutive_empty_cycles INTEGER DEFAULT 0
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS token_blacklist (
+                    jti TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    blacklisted_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+            """)
+            # M2: Refresh token rotation
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    jti TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    revoked INTEGER DEFAULT 0
+                )
+            """)
+            # M9: Auth audit logging
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS auth_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    email TEXT,
+                    user_id TEXT,
+                    ip_address TEXT,
+                    user_agent TEXT,
+                    success INTEGER NOT NULL,
+                    details TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_auth_audit_email_event
+                    ON auth_audit_log (email, event_type, created_at)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_auth_audit_created
+                    ON auth_audit_log (created_at)
+            """)
+
+            # Part C: Social Sentiment System tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sentiment_timeseries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    composite_score REAL,
+                    news_component REAL,
+                    social_component REAL,
+                    momentum_component REAL,
+                    message_volume INTEGER DEFAULT 0,
+                    recorded_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sentiment_ticker_time "
+                "ON sentiment_timeseries(ticker, recorded_at DESC)"
+            )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS social_mentions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    mention_count INTEGER DEFAULT 0,
+                    bullish_count INTEGER DEFAULT 0,
+                    bearish_count INTEGER DEFAULT 0,
+                    recorded_at TEXT NOT NULL
+                )
+            """)
+
+            # Phase 6 Signal Redesign: directional impact scores
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS impact_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    narrative_id TEXT,
+                    ticker TEXT,
+                    direction TEXT,
+                    impact_score REAL,
+                    confidence REAL,
+                    time_horizon TEXT,
+                    signal_components TEXT,
+                    computed_at TEXT,
+                    UNIQUE(narrative_id, ticker)
+                )
+            """)
+
+            # L2: Email verification columns
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN verification_token TEXT")
+            except Exception:
+                pass
+
+            # L3: RBAC role column
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+            except Exception:
+                pass
+
+            # Part C: Dashboard layout persistence
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dashboard_layouts (
+                    user_id TEXT PRIMARY KEY,
+                    layout_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
     # --- Narrative Operations ---
 
     def get_narrative(self, narrative_id: str) -> dict | None:
@@ -1171,12 +1452,42 @@ class SqliteRepository(Repository):
             ).fetchone()
             return dict(row) if row else None
 
-    def get_all_active_narratives(self) -> list[dict]:
+    def get_all_active_narratives(self, *, limit: int = 0, offset: int = 0,
+                                  stage: str | None = None, topic: str | None = None) -> list[dict]:
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM narratives WHERE suppressed = 0"
-            ).fetchall()
+            sql = "SELECT * FROM narratives WHERE suppressed = 0"
+            params: list = []
+            if stage:
+                sql += " AND stage = ?"
+                params.append(stage)
+            else:
+                sql += " AND stage != 'Dormant'"
+            if topic:
+                sql += (" AND topic_tags IS NOT NULL"
+                        " AND EXISTS (SELECT 1 FROM json_each(topic_tags) WHERE value = ?)")
+                params.append(topic)
+            sql += " ORDER BY CAST(ns_score AS REAL) DESC"
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    def count_active_narratives(self, *, stage: str | None = None, topic: str | None = None) -> int:
+        with self._get_conn() as conn:
+            sql = "SELECT COUNT(*) as cnt FROM narratives WHERE suppressed = 0"
+            params: list = []
+            if stage:
+                sql += " AND stage = ?"
+                params.append(stage)
+            else:
+                sql += " AND stage != 'Dormant'"
+            if topic:
+                sql += (" AND topic_tags IS NOT NULL"
+                        " AND EXISTS (SELECT 1 FROM json_each(topic_tags) WHERE value = ?)")
+                params.append(topic)
+            row = conn.execute(sql, params).fetchone()
+            return int(row["cnt"]) if row else 0
 
     def insert_narrative(self, narrative: dict) -> None:
         with self._get_conn() as conn:
@@ -1223,6 +1534,7 @@ class SqliteRepository(Repository):
                 """
                 SELECT narrative_id FROM narratives
                 WHERE suppressed = 0
+                  AND stage != 'Dormant'
                   AND narrative_id NOT IN (
                       SELECT narrative_id FROM narrative_assignments
                       WHERE assigned_at = ?
@@ -1315,19 +1627,21 @@ class SqliteRepository(Repository):
                 (narrative_id, date, centroid_blob),
             )
 
-    def get_centroid_history(self, narrative_id: str, days: int) -> list[dict]:
+    def get_centroid_history(self, narrative_id: str, days: int, *, limit: int = 0, offset: int = 0) -> list[dict]:
         cutoff = (
             datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
         ).isoformat()[:10]  # date portion
         with self._get_conn() as conn:
-            rows = conn.execute(
-                """
+            sql = """
                 SELECT * FROM centroid_history
                 WHERE narrative_id = ? AND date >= ?
                 ORDER BY date DESC
-                """,
-                (narrative_id, cutoff),
-            ).fetchall()
+            """
+            params: list = [narrative_id, cutoff]
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
 
     def get_latest_centroid(self, narrative_id: str) -> bytes | None:
@@ -1379,6 +1693,7 @@ class SqliteRepository(Repository):
             return dict(row) if row else None
 
     def update_sonnet_daily_spend(self, date: str, tokens: int, calls: int) -> None:
+        # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
         with self._get_conn() as conn:
             conn.execute(
                 """
@@ -1391,22 +1706,14 @@ class SqliteRepository(Repository):
                 (date, tokens, calls),
             )
 
-    def check_and_deduct_sonnet_budget(self, date: str, estimated_tokens: int, budget: int) -> bool:
-        """Atomically check and deduct budget. Returns True if within budget."""
+    def get_daily_llm_spend(self) -> float:
+        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         with self._get_conn() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO sonnet_daily_spend (date, total_tokens_used, total_calls) VALUES (?, 0, 0)",
-                (date,),
-            )
-            cursor = conn.execute(
-                """
-                UPDATE sonnet_daily_spend
-                SET total_tokens_used = total_tokens_used + ?, total_calls = total_calls + 1
-                WHERE date = ? AND total_tokens_used + ? < ?
-                """,
-                (estimated_tokens, date, estimated_tokens, budget),
-            )
-            return cursor.rowcount > 0
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cost_estimate_usd), 0) FROM llm_audit_log WHERE called_at >= ?",
+                (today,),
+            ).fetchone()
+            return float(row[0]) if row else 0.0
 
     # --- Adversarial Operations ---
 
@@ -1547,13 +1854,23 @@ class SqliteRepository(Repository):
                 list(evidence.values()),
             )
 
-    def get_document_evidence(self, narrative_id: str) -> list[dict]:
+    def get_document_evidence(self, narrative_id: str, *, limit: int = 0, offset: int = 0) -> list[dict]:
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM document_evidence WHERE narrative_id = ? ORDER BY published_at DESC",
-                (narrative_id,),
-            ).fetchall()
+            sql = "SELECT * FROM document_evidence WHERE narrative_id = ? ORDER BY published_at DESC"
+            params: list = [narrative_id]
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    def count_document_evidence(self, narrative_id: str) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM document_evidence WHERE narrative_id = ?",
+                (narrative_id,),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
 
     def get_document_evidence_by_ids(self, doc_ids: list[str]) -> list[dict]:
         if not doc_ids:
@@ -1696,22 +2013,36 @@ class SqliteRepository(Repository):
             return [dict(r) for r in rows]
 
     def get_changelog_for_narrative(
-        self, narrative_id: str, days: int = 30
+        self, narrative_id: str, days: int = 30, *, limit: int = 0, offset: int = 0
     ) -> list[dict]:
         cutoff = (
             datetime.datetime.now(datetime.timezone.utc)
             - datetime.timedelta(days=days)
         ).isoformat()
         with self._get_conn() as conn:
-            rows = conn.execute(
-                """
+            sql = """
                 SELECT * FROM mutation_events
                 WHERE narrative_id = ? AND detected_at >= ?
                 ORDER BY detected_at DESC
-                """,
-                (narrative_id, cutoff),
-            ).fetchall()
+            """
+            params: list = [narrative_id, cutoff]
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    def count_changelog_for_narrative(self, narrative_id: str, days: int = 30) -> int:
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=days)
+        ).isoformat()
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM mutation_events WHERE narrative_id = ? AND detected_at >= ?",
+                (narrative_id, cutoff),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
 
     # --- Dashboard Operations ---
 
@@ -1834,13 +2165,15 @@ class SqliteRepository(Repository):
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_llm_calls_for_narrative(self, narrative_id: str) -> list[dict]:
+    def get_llm_calls_for_narrative(self, narrative_id: str, *, limit: int = 0, offset: int = 0) -> list[dict]:
         """Return all LLM audit log entries for a narrative."""
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM llm_audit_log WHERE narrative_id = ? ORDER BY called_at DESC",
-                (narrative_id,)
-            ).fetchall()
+            sql = "SELECT * FROM llm_audit_log WHERE narrative_id = ? ORDER BY called_at DESC"
+            params: list = [narrative_id]
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
 
     # --- Stock Cache Operations ---
@@ -2166,6 +2499,45 @@ class SqliteRepository(Repository):
             ).fetchone()
             return row is not None
 
+    def get_notifications_since(self, user_id: str, since: "datetime") -> list[dict]:
+        """Return notifications created after `since` for SSE delivery."""
+        since_str = since.isoformat()
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notifications WHERE user_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT 50",
+                (user_id, since_str),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_dashboard_layout(self, user_id: str) -> dict | None:
+        """Return saved dashboard layout for user, or None if not set."""
+        import json as _json
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT layout_json FROM dashboard_layouts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                return _json.loads(row[0])
+            except Exception:
+                return None
+
+    def save_dashboard_layout(self, user_id: str, layout: dict) -> None:
+        """Upsert dashboard layout for user."""
+        import json as _json
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        layout_json = _json.dumps(layout)
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO dashboard_layouts (user_id, layout_json, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET layout_json=excluded.layout_json, updated_at=excluded.updated_at""",
+                (user_id, layout_json, now),
+            )
+
     # --- Support Operations ---
 
     def get_narratives_created_on_date(self, date: str) -> list[dict]:
@@ -2425,6 +2797,95 @@ class SqliteRepository(Repository):
                 list(user.values()),
             )
 
+    def update_user_password_hash(self, user_id: str, new_hash: str) -> None:
+        """Update a user's password hash (for migration from old bcrypt to pre-hashed bcrypt)."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (new_hash, user_id),
+            )
+
+    def get_user_by_verification_token(self, token: str) -> dict | None:
+        """Look up a user by their email verification token."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, email, email_verified, verification_token, created_at "
+                "FROM users WHERE verification_token = ?",
+                (token,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def mark_email_verified(self, user_id: str) -> None:
+        """Set email_verified=1 and clear the verification token."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE users SET email_verified = 1, verification_token = NULL WHERE id = ?",
+                (user_id,),
+            )
+
+    # --- Token Blacklist Operations ---
+
+    def blacklist_token(self, jti: str, user_id: str, expires_at: str) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO token_blacklist (jti, user_id, blacklisted_at, expires_at) VALUES (?, ?, ?, ?)",
+                (jti, user_id, datetime.datetime.now(datetime.timezone.utc).isoformat(), expires_at),
+            )
+
+    def is_token_blacklisted(self, jti: str) -> bool:
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT 1 FROM token_blacklist WHERE jti = ?", (jti,)).fetchone()
+            return row is not None
+
+    def cleanup_expired_blacklist(self) -> int:
+        with self._get_conn() as conn:
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            cursor = conn.execute("DELETE FROM token_blacklist WHERE expires_at < ?", (now,))
+            return cursor.rowcount
+
+    # --- Refresh Token Operations (M2) ---
+
+    def store_refresh_token(self, jti: str, user_id: str, expires_at: str) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO refresh_tokens (jti, user_id, expires_at, created_at, revoked) VALUES (?, ?, ?, ?, 0)",
+                (jti, user_id, expires_at, datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            )
+
+    def get_refresh_token(self, jti: str) -> dict | None:
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM refresh_tokens WHERE jti = ?", (jti,)).fetchone()
+            return dict(row) if row else None
+
+    def revoke_refresh_token(self, jti: str) -> None:
+        with self._get_conn() as conn:
+            conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE jti = ?", (jti,))
+
+    def revoke_all_user_refresh_tokens(self, user_id: str) -> int:
+        with self._get_conn() as conn:
+            cursor = conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0", (user_id,))
+            return cursor.rowcount
+
+    # --- Auth Audit Logging (M9) ---
+
+    def log_auth_event(self, event: dict) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO auth_audit_log
+                (event_type, email, user_id, ip_address, user_agent, success, details, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event["event_type"],
+                    event.get("email"),
+                    event.get("user_id"),
+                    event.get("ip_address"),
+                    event.get("user_agent"),
+                    1 if event.get("success") else 0,
+                    event.get("details"),
+                    event.get("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                ),
+            )
+
     # --- Tweet Log Operations ---
 
     def insert_tweet_log(self, data: dict) -> None:
@@ -2591,3 +3052,170 @@ class SqliteRepository(Repository):
     def clear_ticker_convergences(self) -> None:
         with self._get_conn() as conn:
             conn.execute("DELETE FROM ticker_convergence")
+
+    # --- Impact Score Operations (Phase 6) ---
+
+    def upsert_impact_score(self, data: dict) -> None:
+        import json as _json
+        narrative_id = data.get("narrative_id")
+        ticker = data.get("ticker")
+        if not narrative_id or not ticker:
+            return
+        signal_components = data.get("signal_components", {})
+        if isinstance(signal_components, dict):
+            signal_components = _json.dumps(signal_components)
+        computed_at = data.get("computed_at", "")
+        if not computed_at:
+            computed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO impact_scores
+                    (narrative_id, ticker, direction, impact_score, confidence,
+                     time_horizon, signal_components, computed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(narrative_id, ticker) DO UPDATE SET
+                    direction = excluded.direction,
+                    impact_score = excluded.impact_score,
+                    confidence = excluded.confidence,
+                    time_horizon = excluded.time_horizon,
+                    signal_components = excluded.signal_components,
+                    computed_at = excluded.computed_at
+            """, (
+                narrative_id,
+                ticker,
+                data.get("direction", "neutral"),
+                float(data.get("impact_score", 0.0)),
+                float(data.get("confidence", 0.0)),
+                data.get("time_horizon", ""),
+                signal_components,
+                computed_at,
+            ))
+
+    def get_impact_scores_for_narrative(self, narrative_id: str) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM impact_scores WHERE narrative_id = ? ORDER BY impact_score DESC",
+                (narrative_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_impact_scores_for_ticker(self, ticker: str) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM impact_scores WHERE ticker = ? ORDER BY impact_score DESC",
+                (ticker,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_top_impact_scores(self, limit: int = 20) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM impact_scores ORDER BY impact_score DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # --- Sentiment Timeseries Operations ---
+
+    def insert_sentiment_record(self, ticker: str, scores: dict) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO sentiment_timeseries
+                    (ticker, composite_score, news_component, social_component,
+                     momentum_component, message_volume, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                ticker,
+                float(scores.get("composite_score") or 0),
+                float(scores.get("news_component") or 0),
+                float(scores.get("social_component") or 0),
+                float(scores.get("momentum_component") or 0),
+                int(scores.get("message_volume_24h") or 0),
+                now,
+            ))
+
+    def get_sentiment_timeseries(self, ticker: str, hours: int = 168) -> list[dict]:
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+        ).isoformat()
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sentiment_timeseries WHERE ticker = ? AND recorded_at >= ?"
+                " ORDER BY recorded_at DESC",
+                (ticker, cutoff),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_latest_sentiment(self, ticker: str) -> dict | None:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM sentiment_timeseries WHERE ticker = ?"
+                " ORDER BY recorded_at DESC LIMIT 1",
+                (ticker,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def insert_social_mention(self, ticker: str, source: str, counts: dict) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO social_mentions (ticker, source, mention_count, bullish_count, bearish_count, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                ticker,
+                source,
+                int(counts.get("mention_count") or 0),
+                int(counts.get("bullish_count") or 0),
+                int(counts.get("bearish_count") or 0),
+                now,
+            ))
+
+    def get_trending_tickers(self, hours: int = 24, limit: int = 10) -> list[dict]:
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+        ).isoformat()
+        with self._get_conn() as conn:
+            rows = conn.execute("""
+                SELECT ticker,
+                       SUM(mention_count)  AS total_mentions,
+                       SUM(bullish_count)  AS total_bullish,
+                       SUM(bearish_count)  AS total_bearish
+                FROM social_mentions
+                WHERE recorded_at >= ?
+                GROUP BY ticker
+                ORDER BY total_mentions DESC
+                LIMIT ?
+            """, (cutoff, max(1, limit))).fetchall()
+            return [dict(r) for r in rows]
+
+    # --- Feed Metadata Operations ---
+
+    def get_feed_metadata(self, feed_url: str) -> dict | None:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM feed_metadata WHERE feed_url = ?", (feed_url,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_feed_metadata(self, feed_url: str, etag: str | None, last_modified: str | None, new_doc_count: int) -> None:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            existing = conn.execute(
+                "SELECT consecutive_empty_cycles FROM feed_metadata WHERE feed_url = ?",
+                (feed_url,),
+            ).fetchone()
+            if new_doc_count > 0:
+                empty_cycles = 0
+            else:
+                empty_cycles = (existing["consecutive_empty_cycles"] + 1) if existing else 1
+            conn.execute(
+                """INSERT INTO feed_metadata (feed_url, etag, last_modified, last_fetched_at, consecutive_empty_cycles)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(feed_url) DO UPDATE SET
+                       etag = excluded.etag,
+                       last_modified = excluded.last_modified,
+                       last_fetched_at = excluded.last_fetched_at,
+                       consecutive_empty_cycles = excluded.consecutive_empty_cycles""",
+                (feed_url, etag, last_modified, now_iso, empty_cycles),
+            )

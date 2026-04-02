@@ -152,6 +152,7 @@ import {
   fetchLifecycleFunnel,
   fetchLeadTimeDistribution,
   fetchContrarianSignals,
+  setApiToken,
 } from "../lib/api";
 
 import { COLORS } from "../lib/colors";
@@ -346,8 +347,10 @@ describe("Error handling", () => {
   });
 
   test("A-ERR-5a: fetchNarratives throws on 401", async () => {
+    setApiToken("token");
     mockFail(401);
-    await expect(fetchNarratives("token")).rejects.toThrow("narratives fetch failed: 401");
+    await expect(fetchNarratives()).rejects.toThrow("narratives fetch failed: 401");
+    setApiToken(null);
   });
 
   test("A-ERR-5b: fetchTicker throws on 503", async () => {
@@ -669,18 +672,32 @@ describe("Adversarial inputs", () => {
 // ---------------------------------------------------------------------------
 
 describe("Auth headers", () => {
-  test("fetchNarratives sends x-auth-token when provided", async () => {
+  afterEach(() => {
+    setApiToken(null);
+  });
+
+  test("fetchNarratives sends x-auth-token via module-level token", async () => {
+    setApiToken("my-token");
     mockOk([]);
-    await fetchNarratives("my-token");
+    await fetchNarratives();
     const opts = mockFetch.mock.calls[0][1] as RequestInit;
     expect((opts.headers as Record<string, string>)["x-auth-token"]).toBe("my-token");
   });
 
-  test("fetchNarratives sends no auth header when token is undefined", async () => {
+  test("fetchNarratives sends no auth header when token is null", async () => {
+    setApiToken(null);
     mockOk([]);
     await fetchNarratives();
     const opts = mockFetch.mock.calls[0][1] as RequestInit;
-    expect(opts.headers).toEqual({});
+    expect((opts.headers as Record<string, string>)["x-auth-token"]).toBeUndefined();
+  });
+
+  test("fetchTicker sends x-auth-token via module-level token", async () => {
+    setApiToken("test-tok");
+    mockOk([]);
+    await fetchTicker();
+    const opts = mockFetch.mock.calls[0][1] as RequestInit;
+    expect((opts.headers as Record<string, string>)["x-auth-token"]).toBe("test-tok");
   });
 
   test("topupCredits sends both Content-Type and x-auth-token", async () => {

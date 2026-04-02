@@ -28,6 +28,7 @@ from signals import (
     compute_cohesion,
     compute_cross_source_score,
     compute_entropy,
+    compute_inflow_velocity,
     compute_intent_weight,
     compute_burst_velocity,
     compute_lifecycle_stage,
@@ -38,11 +39,40 @@ from signals import (
     get_narrative_age_days,
     validate_signal_fields,
 )
+from api.sector_map import SECTOR_MAP
 from convergence import compute_all_convergences
 from source_tiers import compute_source_escalation, compute_weighted_source_score
 from vector_store import FaissVectorStore
+from prompt_utils import sanitize_for_prompt, strip_control_chars
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Topic keyword classifier (Finding 4: replaces Haiku classify_topic call)
+# ---------------------------------------------------------------------------
+
+_TOPIC_KEYWORDS: dict[str, list[str]] = {
+    "crypto": ["crypto", "bitcoin", "ethereum", "blockchain", "defi", "token", "mining"],
+    "geopolitical": ["military", "war", "sanction", "nato", "invasion", "conflict", "geopolit"],
+    "macro": ["fed", "inflation", "rate", "gdp", "unemployment", "recession", "monetary", "fiscal"],
+    "regulatory": ["regulat", "sec", "ftc", "antitrust", "compliance", "ban", "legislat"],
+    "esg": ["climate", "carbon", "emission", "sustainability", "renewable", "green", "esg"],
+    "m&a": ["merger", "acquisition", "takeover", "buyout", "deal"],
+    "earnings": ["earnings", "revenue", "profit", "quarter", "guidance", "eps", "forecast"],
+}
+
+_VALID_TOPIC_TAGS: frozenset[str] = frozenset(_TOPIC_KEYWORDS)
+
+
+def _classify_topic_keywords(narrative_name: str, excerpts: list[str]) -> list[str]:
+    """Deterministic topic classification via keyword matching.
+
+    Returns matched topic tags (1+). Empty list means ambiguous — caller
+    should fall back to Haiku.
+    """
+    corpus = (narrative_name + " " + " ".join(excerpts)).lower()
+    return [topic for topic, kws in _TOPIC_KEYWORDS.items() if any(kw in corpus for kw in kws)]
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +630,15 @@ def run() -> None:
             new_assignment_count = len(new_doc_ids)
             doc_count = int(narrative.get("document_count") or 0) + new_assignment_count
 
+            # Phase 5: Inflow velocity — document arrival rate relative to 7-day average
+            try:
+                baseline_doc_rate = repository.get_baseline_doc_rate(narrative_id, lookback_days=7)
+                avg_docs_per_cycle_7d = baseline_doc_rate if baseline_doc_rate > 0 else float(narrative.get("avg_docs_per_cycle_7d") or 0.0)
+                inflow_vel = compute_inflow_velocity(new_assignment_count, avg_docs_per_cycle_7d)
+            except Exception:
+                avg_docs_per_cycle_7d = 0.0
+                inflow_vel = 0.0
+
             # Sentiment mean/variance and source count for signal validation
             from signals import compute_sentiment_scores
             if doc_texts:
@@ -620,6 +659,8 @@ def run() -> None:
                 "cohesion": cohesion,
                 "polarization": polarization,
                 "document_count": doc_count,
+                "inflow_velocity": inflow_vel,
+                "avg_docs_per_cycle_7d": avg_docs_per_cycle_7d,
                 "sentiment_mean": sentiment_mean,
                 "sentiment_variance": sentiment_variance,
                 "source_count": source_count,
@@ -631,8 +672,9 @@ def run() -> None:
                 "weighted_source_score": weighted_src_score,
             })
 
-            # F1: Lifecycle stage progression
+            # F1: Lifecycle stage progression (with hysteresis)
             age_days = get_narrative_age_days(narrative.get("created_at") or now_iso)
+            cycles_in_stage = int(narrative.get("cycles_in_current_stage") or 0)
             new_stage = compute_lifecycle_stage(
                 current_stage=narrative.get("stage") or "Emerging",
                 document_count=doc_count,
@@ -640,10 +682,13 @@ def run() -> None:
                 entropy=entropy,
                 consecutive_declining_days=int(narrative.get("consecutive_declining_days") or 0),
                 days_since_creation=age_days,
+                cycles_in_current_stage=cycles_in_stage,
             )
             if new_stage != (narrative.get("stage") or "Emerging"):
-                repository.update_narrative(narrative_id, {"stage": new_stage})
+                repository.update_narrative(narrative_id, {"stage": new_stage, "cycles_in_current_stage": 0})
                 logger.info("Narrative %s stage: %s → %s", narrative_id, narrative.get("stage"), new_stage)
+            else:
+                repository.update_narrative(narrative_id, {"cycles_in_current_stage": cycles_in_stage + 1})
 
             # F2: Burst velocity — doc ingestion rate acceleration
             try:
@@ -785,10 +830,24 @@ def run() -> None:
         # Non-fatal: continue
 
     # ------------------------------------------------------------------ #
-    # Step 12: Compute Ns Score                                           #
+    # Step 12: Compute Ns Score (with learned weights)                    #
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
     try:
+        from signal_trainer import load_or_train_model, compute_learned_ns_score, _safe_float
+        from signals import direction_to_float, certainty_to_float, magnitude_to_float
+        import math as _math
+
+        signal_model = load_or_train_model(
+            repository,
+            settings.SIGNAL_MODEL_PATH,
+            retrain_days=settings.SIGNAL_MODEL_RETRAIN_DAYS,
+            min_samples=settings.SIGNAL_MIN_TRAINING_SAMPLES,
+        )
+        model_method = signal_model.get("method", "default")
+        logger.info("Step 12: using signal model method=%s (n=%d)",
+                     model_method, signal_model.get("n_samples", 0))
+
         active_narratives = repository.get_all_active_narratives()
 
         for narrative in active_narratives:
@@ -802,32 +861,46 @@ def run() -> None:
             centrality = float(narrative.get("centrality") or 0.0)
             entropy = narrative.get("entropy")  # None is valid
 
-            defaults_used = []
-            if velocity == 0.0:
-                defaults_used.append("velocity")
-            if entropy is None:
-                defaults_used.append("entropy")
-            if defaults_used:
-                logger.debug(
-                    "Narrative %s: using 0.0 defaults for: %s",
-                    narrative_id, ", ".join(defaults_used),
-                )
+            # Build 15-feature dict for learned model
+            signal = repository.get_narrative_signal(narrative_id)
+            entropy_normalized = 0.0
+            if entropy is not None:
+                try:
+                    log_window = _math.log(settings.ENTROPY_VOCAB_WINDOW) if settings.ENTROPY_VOCAB_WINDOW > 1 else 1.0
+                    entropy_normalized = min(float(entropy) / log_window, 1.0)
+                except (TypeError, ValueError):
+                    pass
 
-            ns_score = compute_ns_score(
-                velocity=velocity,
-                intent_weight=intent_weight,
-                cross_source_score=cross_source_score,
-                cohesion=cohesion,
-                polarization=polarization,
-                centrality=centrality,
-                entropy=entropy,
-                entropy_vocab_window=settings.ENTROPY_VOCAB_WINDOW,
-            )
+            features = {
+                "velocity_windowed": float(narrative.get("velocity_windowed") or 0.0),
+                "inflow_velocity": float(narrative.get("inflow_velocity") or 0.0),
+                "cross_source_score": cross_source_score,
+                "cohesion": cohesion,
+                "intent_weight": intent_weight,
+                "centrality": centrality,
+                "entropy_normalized": entropy_normalized,
+                "direction_float": direction_to_float(signal.get("direction", "neutral")) if signal else 0.0,
+                "confidence": _safe_float(signal.get("confidence")) if signal else 0.0,
+                "certainty_float": certainty_to_float(signal.get("certainty", "speculative")) if signal else 0.2,
+                "magnitude_float": magnitude_to_float(signal.get("magnitude", "incremental")) if signal else 0.3,
+                "source_escalation_velocity": float(narrative.get("source_escalation_velocity") or 0.0),
+                "convergence_exposure": float(narrative.get("convergence_exposure") or 0.0),
+                "catalyst_proximity_score": float(narrative.get("catalyst_proximity_score") or 0.0),
+                "macro_alignment": float(narrative.get("macro_alignment") or 0.0),
+                # Extra fields needed by default fallback path
+                "polarization": polarization,
+                "entropy": entropy,
+                "entropy_vocab_window": settings.ENTROPY_VOCAB_WINDOW,
+            }
+
+            ns_score = compute_learned_ns_score(features, signal_model)
             repository.update_narrative(narrative_id, {"ns_score": ns_score})
 
-        logger.info("Step 12: Ns scores for %d narratives", len(active_narratives))
+        logger.info("Step 12: Ns scores for %d narratives (method=%s)",
+                     len(active_narratives), model_method)
         step_duration = (time.monotonic() - step_start) * 1000
-        _log_step(repository, cycle_id, 12, "ns_score", "OK", step_duration)
+        _log_step(repository, cycle_id, 12, "ns_score", "OK", step_duration,
+                  f"method={model_method}")
 
     except Exception as exc:
         step_duration = (time.monotonic() - step_start) * 1000
@@ -858,8 +931,6 @@ def run() -> None:
                 repository.update_narrative(narrative_id, {
                     "ns_score": max(0.0, current_ns - 0.25),
                 })
-
-        deduplicator.clear_batch()
 
         logger.info("Step 13: adversarial check — %d events", len(adversarial_events))
         step_duration = (time.monotonic() - step_start) * 1000
@@ -898,12 +969,13 @@ def run() -> None:
             )
             if needs_label:
                 evidence = repository.get_document_evidence(narrative_id)
-                # Sanitize excerpts: strip format markers that could inject into response parsing
+                # Sanitize excerpts: strip control chars + format markers
                 sanitized_excerpts = []
                 for e in evidence[:5]:
                     excerpt = (e.get("excerpt") or "")[:200]
                     for marker in ("NAME:", "DESCRIPTION:", "TAG:", "TAGS:", "SIGNAL_JSON:", "Signal_Json:", "signal_json:"):
                         excerpt = excerpt.replace(marker, "")
+                    excerpt = strip_control_chars(excerpt)
                     sanitized_excerpts.append(excerpt)
                 excerpt_text = " ".join(sanitized_excerpts)
                 label_prompt = (
@@ -985,11 +1057,12 @@ def run() -> None:
                             excerpt = (e.get("excerpt") or "")[:200]
                             for marker in ("NAME:", "DESCRIPTION:", "TAG:", "TAGS:", "SIGNAL_JSON:", "Signal_Json:", "signal_json:"):
                                 excerpt = excerpt.replace(marker, "")
+                            excerpt = strip_control_chars(excerpt)
                             sa_excerpts.append(excerpt)
                         sa_text = " ".join(sa_excerpts)
 
                         if sa_text.strip():
-                            nar_name = narrative.get("name") or "unknown narrative"
+                            nar_name = sanitize_for_prompt(narrative.get("name") or "unknown narrative")
                             signal_prompt = (
                                 f'Analyze these excerpts about the narrative "{nar_name}".\n\n'
                                 f"Excerpts:\n{sa_text}\n\n"
@@ -1020,24 +1093,31 @@ def run() -> None:
                     )
 
             # F4: Topic classification (OUTSIDE needs_label — runs for all untagged narratives)
+            # Keyword classifier first; Haiku only for ambiguous cases (0 keyword matches).
             existing_tags = narrative.get("topic_tags")
             if existing_tags is None or existing_tags == "null" or existing_tags == "[]":
-                nar_name = narrative.get("name") or "unknown"
-                topic_prompt = (
-                    f'Classify this narrative about "{nar_name}" into 1-3 topic tags from this list:\n'
-                    "regulatory, earnings, geopolitical, macro, esg, m&a, crypto\n"
-                    "Return ONLY the tag names, comma-separated. Example: regulatory, macro"
-                )
-                try:
-                    raw_tags = llm_client.call_haiku("classify_topic", narrative_id, topic_prompt)
-                    valid_tags = {"regulatory", "earnings", "geopolitical", "macro", "esg", "m&a", "crypto"}
-                    tags = [t.strip().lower() for t in raw_tags.split(",") if t.strip().lower() in valid_tags]
-                    if tags:
-                        repository.update_narrative_tags(narrative_id, tags)
-                        logger.info("Narrative %s topics: %s", narrative_id, tags)
+                nar_name = narrative.get("name") or ""
+                top_docs = repository.get_document_evidence(narrative_id, limit=3)
+                excerpts = [(d.get("excerpt") or "") for d in top_docs]
+                tags = _classify_topic_keywords(nar_name, excerpts)
+                if not tags:
+                    # Ambiguous — fall back to Haiku
+                    nar_name_safe = sanitize_for_prompt(nar_name or "unknown")
+                    topic_prompt = (
+                        f'Classify this narrative about "{nar_name_safe}" into 1-3 topic tags from this list:\n'
+                        "regulatory, earnings, geopolitical, macro, esg, m&a, crypto\n"
+                        "Return ONLY the tag names, comma-separated. Example: regulatory, macro"
+                    )
+                    try:
+                        raw_tags = llm_client.call_haiku("classify_topic", narrative_id, topic_prompt)
+                        tags = [t.strip().lower() for t in raw_tags.split(",")
+                                if t.strip().lower() in _VALID_TOPIC_TAGS]
                         haiku_count += 1
-                except Exception as exc:
-                    logger.debug("Topic classification skipped for %s: %s", narrative_id, exc)
+                    except Exception as exc:
+                        logger.debug("Topic classification fallback failed for %s: %s", narrative_id, exc)
+                if tags:
+                    repository.update_narrative_tags(narrative_id, tags)
+                    logger.info("Narrative %s topics: %s", narrative_id, tags)
 
             # Re-fetch to get stage already computed by Step 10 (compute_lifecycle_stage)
             fresh = repository.get_narrative(narrative_id) or narrative
@@ -1093,6 +1173,13 @@ def run() -> None:
         active_narratives = repository.get_all_active_narratives()
         sonnet_count = 0
 
+        # Secondary Sonnet trigger: narratives with doc_surge or score_spike
+        today_mutations = repository.get_mutations_today()
+        mutation_qualified_ids = {
+            m["narrative_id"] for m in today_mutations
+            if m.get("mutation_type") in ("doc_surge", "score_spike")
+        }
+
         for narrative in active_narratives:
             narrative_id = narrative["narrative_id"]
             ns_score = float(narrative.get("ns_score") or 0.0)
@@ -1100,11 +1187,16 @@ def run() -> None:
             if bool(narrative.get("suppressed", 0)):
                 continue
 
-            if ns_score >= settings.CONFIDENCE_ESCALATION_THRESHOLD:
+            if ns_score >= settings.CONFIDENCE_ESCALATION_THRESHOLD or narrative_id in mutation_qualified_ids:
                 evidence = repository.get_document_evidence(narrative_id)
-                excerpt_text = " ".join(
-                    (e.get("excerpt") or "")[:300] for e in evidence[:10]
-                )
+                sa_excerpts_mut = []
+                for e in evidence[:10]:
+                    excerpt = (e.get("excerpt") or "")[:300]
+                    for marker in ("NAME:", "DESCRIPTION:", "TAG:", "TAGS:", "SIGNAL_JSON:", "Signal_Json:", "signal_json:"):
+                        excerpt = excerpt.replace(marker, "")
+                    excerpt = strip_control_chars(excerpt)
+                    sa_excerpts_mut.append(excerpt)
+                excerpt_text = " ".join(sa_excerpts_mut)
                 mutation_prompt = (
                     "Analyze how this financial narrative has evolved. "
                     "Identify key mutations, theme shifts, and emerging sub-themes. "
@@ -1192,8 +1284,42 @@ def run() -> None:
             ]
 
             centroid_vec = vector_store.get_vector(narrative_id)
-            linked_assets = asset_mapper.map_narrative(centroid_vec) \
-                if centroid_vec is not None else []
+            topic_tags_raw = narrative.get("topic_tags")
+            narrative_topic_tags = json.loads(topic_tags_raw) if topic_tags_raw else []
+            linked_assets = asset_mapper.map_narrative(
+                centroid_vec,
+                min_similarity=settings.ASSET_MAPPING_MIN_SIMILARITY,
+                topic_tags=narrative_topic_tags,
+                sector_map=SECTOR_MAP,
+            ) if centroid_vec is not None else []
+
+            # Phase 6: Enrich linked_assets with directional impact scores
+            if linked_assets:
+                try:
+                    from impact_scorer import enrich_linked_assets
+                    enriched = enrich_linked_assets(narrative_id, linked_assets, repository)
+                    if enriched:
+                        linked_assets = enriched
+                        # Persist each impact score to impact_scores table
+                        from datetime import datetime as _dt, timezone as _tz
+                        computed_at = _dt.now(_tz.utc).isoformat()
+                        for asset_impact in enriched:
+                            try:
+                                repository.upsert_impact_score({
+                                    "narrative_id": narrative_id,
+                                    "ticker": asset_impact.get("ticker", ""),
+                                    "direction": asset_impact.get("direction", "neutral"),
+                                    "impact_score": asset_impact.get("impact_score", 0.0),
+                                    "confidence": asset_impact.get("confidence", 0.0),
+                                    "time_horizon": asset_impact.get("time_horizon", ""),
+                                    "signal_components": asset_impact.get("signal_components", {}),
+                                    "computed_at": computed_at,
+                                })
+                            except Exception as ie:
+                                logger.debug("Impact score persist failed for %s/%s: %s",
+                                             narrative_id, asset_impact.get("ticker"), ie)
+                except Exception as enrich_exc:
+                    logger.debug("Impact enrichment failed for %s: %s", narrative_id, enrich_exc)
 
             # Persist linked_assets to DB for API access
             if linked_assets:
@@ -1247,6 +1373,73 @@ def run() -> None:
         # Non-fatal: continue
 
     # ------------------------------------------------------------------ #
+    # Step 19.1: Catalyst Anchoring (Phase 4)                            #
+    # ------------------------------------------------------------------ #
+    step_start = time.monotonic()
+    try:
+        from catalyst_service import compute_catalyst_proximity
+
+        active_for_catalyst = repository.get_all_active_narratives()
+        catalyst_count = 0
+
+        for narrative in active_for_catalyst:
+            narrative_id = narrative["narrative_id"]
+            linked_raw = narrative.get("linked_assets")
+            if not linked_raw:
+                continue
+
+            try:
+                assets = json.loads(linked_raw) if isinstance(linked_raw, str) else linked_raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not assets:
+                continue
+
+            # Get direction and sectors from narrative_signals (Phase 1)
+            signal = repository.get_narrative_signal(narrative_id)
+            direction = signal.get("direction", "neutral") if signal else "neutral"
+            try:
+                sectors = json.loads(signal.get("affected_sectors", "[]")) if signal else []
+            except (json.JSONDecodeError, TypeError):
+                sectors = []
+
+            best_proximity = 0.0
+            best_result = None
+
+            for asset in assets:
+                ticker = asset.get("ticker", "")
+                if not ticker or ticker.startswith("TOPIC:"):
+                    continue
+                try:
+                    result = compute_catalyst_proximity(ticker, direction, sectors)
+                    if result["proximity_score"] > best_proximity:
+                        best_proximity = result["proximity_score"]
+                        best_result = result
+                except Exception as exc:
+                    logger.debug("Catalyst proximity failed for %s/%s: %s", narrative_id, ticker, exc)
+                    continue
+
+            if best_result:
+                repository.update_narrative(narrative_id, {
+                    "catalyst_proximity_score": best_result["proximity_score"],
+                    "days_to_catalyst": best_result["days_to_earnings"] if best_result["catalyst_type"] == "earnings" else best_result["days_to_fomc"],
+                    "catalyst_type": best_result["catalyst_type"],
+                    "macro_alignment": best_result["macro_alignment"],
+                })
+                catalyst_count += 1
+
+        logger.info("Step 19.1: catalyst anchoring computed for %d narratives", catalyst_count)
+        step_duration = (time.monotonic() - step_start) * 1000
+        _log_step(repository, cycle_id, 191, "catalyst_anchoring", "OK", step_duration,
+                  f"anchored={catalyst_count}")
+
+    except Exception as exc:
+        step_duration = (time.monotonic() - step_start) * 1000
+        logger.error("Step 19.1 (catalyst anchoring) failed: %s", exc, exc_info=True)
+        _log_step(repository, cycle_id, 191, "catalyst_anchoring", "ERROR", step_duration, str(exc))
+        # Non-fatal: continue
+
+    # ------------------------------------------------------------------ #
     # Step 19.5: Snapshot and Detect Mutations                           #
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
@@ -1297,10 +1490,7 @@ def run() -> None:
         _log_step(repository, cycle_id, 197, "check_notifications", "ERROR", step_duration, str(exc))
         # Non-fatal: continue to cleanup
 
-    # ------------------------------------------------------------------ #
-    # Hook point: add social posting module here                          #
-    # Example: import your_bot; your_bot.dispatch(repository, settings)   #
-    # ------------------------------------------------------------------ #
+    # Hook: add your own post-pipeline dispatch here (e.g., Twitter bot, Slack, etc.)
 
     # ------------------------------------------------------------------ #
     # Step 20: Cleanup                                                    #

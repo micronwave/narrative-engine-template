@@ -3,6 +3,8 @@ import pickle
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from safe_pickle import safe_load
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.decomposition import TruncatedSVD
@@ -66,10 +68,21 @@ class MiniLMEmbedder(EmbeddingModel):
     def _load_hybrid_components(self) -> None:
         if self._tfidf_path.exists() and self._svd_path.exists():
             try:
-                with open(self._tfidf_path, "rb") as f:
-                    tfidf = pickle.load(f)
-                with open(self._svd_path, "rb") as f:
-                    svd = pickle.load(f)
+                _SKLEARN_ALLOWED = {
+                    "builtins": {"dict", "list", "tuple", "str", "int", "float", "bool"},
+                    "numpy": {"ndarray", "dtype", "float64", "float32", "int64"},
+                    "numpy.core.multiarray": {"scalar", "_reconstruct"},
+                    "numpy._core.multiarray": {"scalar", "_reconstruct"},
+                    "numpy._core.numeric": {"_frombuffer"},
+                    "numpy.core.numeric": {"_frombuffer"},
+                    "scipy.sparse": {"csr_matrix", "csc_matrix"},
+                    "scipy.sparse._csr": {"csr_matrix"},
+                    "sklearn.feature_extraction.text": {"TfidfVectorizer"},
+                    "sklearn.decomposition._truncated_svd": {"TruncatedSVD"},
+                    # May need additional sklearn/scipy internal classes
+                }
+                tfidf = safe_load(str(self._tfidf_path), allowed=_SKLEARN_ALLOWED)
+                svd = safe_load(str(self._svd_path), allowed=_SKLEARN_ALLOWED)
                 if not isinstance(tfidf, TfidfVectorizer):
                     raise TypeError(f"Expected TfidfVectorizer, got {type(tfidf).__name__}")
                 if not isinstance(svd, TruncatedSVD):

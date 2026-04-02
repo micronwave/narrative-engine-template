@@ -5,6 +5,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import { AlertProvider } from "@/contexts/AlertContext";
 import { WatchlistProvider } from "@/contexts/WatchlistContext";
 import NavBar from "@/components/NavBar";
+import QueryProvider from "@/components/QueryProvider";
 
 const ibmPlexSans = IBM_Plex_Sans({
   subsets: ["latin"],
@@ -34,16 +35,18 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${ibmPlexSans.variable} ${ibmPlexMono.variable}`}>
       <body className={`${ibmPlexSans.className} antialiased`}>
-        <AuthProvider>
-          <AlertProvider>
-            <WatchlistProvider>
-              <NavBar />
-              <main className="min-h-screen md:ml-16 pb-20 md:pb-0">
-                {children}
-              </main>
-            </WatchlistProvider>
-          </AlertProvider>
-        </AuthProvider>
+        <QueryProvider>
+          <AuthProvider>
+            <AlertProvider>
+              <WatchlistProvider>
+                <NavBar />
+                <main className="min-h-screen md:ml-16 pb-20 md:pb-0">
+                  {children}
+                </main>
+              </WatchlistProvider>
+            </AlertProvider>
+          </AuthProvider>
+        </QueryProvider>
       </body>
     </html>
   );

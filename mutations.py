@@ -141,10 +141,6 @@ class MutationDetector:
             explanation = self.generate_template_explanation(
                 narrative_id, "stage_change", y_stage, t_stage
             )
-            if explanation is None:
-                explanation = self.generate_llm_explanation(
-                    narrative_id, "stage_change", y_stage, t_stage
-                )
             mutations.append(self._save_mutation(
                 narrative_id, "stage_change",
                 y_stage, t_stage, 1.0, explanation
@@ -173,10 +169,6 @@ class MutationDetector:
             explanation = self.generate_template_explanation(
                 narrative_id, "new_sonnet", "none", "sonnet analysis generated"
             )
-            if explanation is None:
-                explanation = self.generate_llm_explanation(
-                    narrative_id, "new_sonnet", "none", "sonnet analysis generated"
-                )
             mutations.append(self._save_mutation(
                 narrative_id, "new_sonnet",
                 "none", "sonnet_analysis_generated", 1.0, explanation

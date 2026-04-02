@@ -16,10 +16,16 @@ from settings import Settings
 
 logger = logging.getLogger(__name__)
 
-# Last updated: 2025-10. Update when Anthropic changes pricing.
+
+class BudgetExceededError(Exception):
+    """Raised when the daily LLM spend ceiling is reached."""
+    pass
+
+
+# Pricing as of 2026-03. Source: https://docs.anthropic.com/en/docs/about-claude/pricing
 # Prices per 1M tokens in USD
-HAIKU_INPUT_PRICE_PER_M = 1.00
-HAIKU_OUTPUT_PRICE_PER_M = 5.00
+HAIKU_INPUT_PRICE_PER_M = 0.80
+HAIKU_OUTPUT_PRICE_PER_M = 4.00
 SONNET_INPUT_PRICE_PER_M = 3.00
 SONNET_OUTPUT_PRICE_PER_M = 15.00
 # NOTE: These are for claude-haiku-4-5-20251001 and claude-sonnet-4-6
@@ -108,7 +114,7 @@ class LlmClient:
     Single interface for all LLM calls.
     No direct anthropic SDK calls outside this file.
 
-    # TODO SCALE: Redis INCR for concurrent workers
+    # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
     """
 
     def __init__(self, settings: Settings, repository: Repository) -> None:
@@ -175,14 +181,11 @@ class LlmClient:
             )
             return False, f"gate_3_recent_sonnet_call: {len(recent_calls)} call(s)"
 
-        # Gate 4: atomic budget check — deducts tokens if within budget
+        # Gate 4: estimated_tokens + today's spend < SONNET_DAILY_TOKEN_BUDGET
         today_str = datetime.now(timezone.utc).date().isoformat()
-        budget_ok = self._repository.check_and_deduct_sonnet_budget(
-            today_str, estimated_tokens, self._settings.SONNET_DAILY_TOKEN_BUDGET
-        )
-        if not budget_ok:
-            spend_record = self._repository.get_sonnet_daily_spend(today_str)
-            tokens_used = int((spend_record.get("total_tokens_used") or 0) if spend_record else 0)
+        spend_record = self._repository.get_sonnet_daily_spend(today_str)
+        tokens_used = int((spend_record.get("total_tokens_used") or 0) if spend_record else 0)
+        if tokens_used + estimated_tokens >= self._settings.SONNET_DAILY_TOKEN_BUDGET:
             return (
                 False,
                 f"gate_4_budget_ceiling: used={tokens_used}, est={estimated_tokens}, "
@@ -204,6 +207,12 @@ class LlmClient:
         task_type: 'label_narrative' | 'classify_stage' | 'summarize_mutation_fallback' | 'compose_draft'
         max_tokens: override for HAIKU_MAX_TOKENS (default: settings value)
         """
+        daily_spend = self._repository.get_daily_llm_spend()
+        if daily_spend >= self._settings.LLM_DAILY_BUDGET_USD:
+            raise BudgetExceededError(
+                f"Daily LLM budget exceeded (${daily_spend:.2f} / ${self._settings.LLM_DAILY_BUDGET_USD:.2f})"
+            )
+
         effective_max_tokens = max_tokens if max_tokens is not None else self._settings.HAIKU_MAX_TOKENS
         backoff_delays = [1, 3]
         last_exc: Exception | None = None
@@ -347,13 +356,11 @@ class LlmClient:
                 }
             )
 
-            # Budget was pre-deducted by gate 4; reconcile actual vs estimated
             today_str = datetime.now(timezone.utc).date().isoformat()
-            actual_tokens = input_tokens + output_tokens
-            estimated_tokens = self.estimate_tokens(prompt) + self._settings.SONNET_MAX_TOKENS
-            delta = actual_tokens - estimated_tokens
-            if delta != 0:
-                self._repository.update_sonnet_daily_spend(today_str, delta, 0)
+            # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
+            self._repository.update_sonnet_daily_spend(
+                today_str, input_tokens + output_tokens, 1
+            )
 
             return result_text
 
@@ -375,6 +382,12 @@ class LlmClient:
 
     def call_haiku_chat(self, system_prompt: str, messages: list[dict]) -> dict:
         """Multi-turn chat with Haiku. Returns {content, tokens, cost}."""
+        daily_spend = self._repository.get_daily_llm_spend()
+        if daily_spend >= self._settings.LLM_DAILY_BUDGET_USD:
+            raise BudgetExceededError(
+                f"Daily LLM budget exceeded (${daily_spend:.2f} / ${self._settings.LLM_DAILY_BUDGET_USD:.2f})"
+            )
+
         try:
             response = self._client.messages.create(
                 model=self._settings.HAIKU_MODEL,

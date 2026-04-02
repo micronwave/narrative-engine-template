@@ -9,11 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.96.1",
     "d3-sankey": "^0.12.3",
+    "lightweight-charts": "^5.1.0",
     "lucide-react": "^0.577.0",
     "next": "14.2.35",
     "react": "^18",
-    "react-dom": "^18"
+    "react-dom": "^18",
+    "react-grid-layout": "^2.2.3",
+    "technicalindicators": "^3.1.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
@@ -24,6 +28,7 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/react-grid-layout": "^1.3.6",
     "eslint": "^8",
     "eslint-config-next": "14.2.35",
     "jest": "^30.3.0",

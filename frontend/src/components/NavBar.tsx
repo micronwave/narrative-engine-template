@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Radio, Network, Inbox, BarChart2, ShieldAlert, TrendingUp, Briefcase, Bell, MoreHorizontal, X } from "lucide-react";
+import { Radio, Network, Inbox, BarChart2, ShieldAlert, TrendingUp, Briefcase, Bell, MoreHorizontal, X, Activity, MessageSquare, LayoutDashboard } from "lucide-react";
 import { useAlerts } from "@/contexts/AlertContext";
 
 const PRIMARY_TABS = [
@@ -14,9 +14,12 @@ const PRIMARY_TABS = [
 ];
 
 const OVERFLOW_ITEMS = [
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/signals", label: "Inbox", icon: Inbox },
   { href: "/market-impact", label: "Market Impact", icon: TrendingUp },
   { href: "/manipulation", label: "Manipulation", icon: ShieldAlert },
+  { href: "/sentiment", label: "Sentiment", icon: Activity },
+  { href: "/social", label: "Social", icon: MessageSquare },
 ];
 
 const NAV_ITEMS = [...PRIMARY_TABS, ...OVERFLOW_ITEMS];
