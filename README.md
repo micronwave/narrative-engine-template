@@ -1,6 +1,6 @@
 # Narrative Intelligence Engine — Template
 
-> **This is a template repository.** Fork it, customize the data sources and asset universe, and build your own narrative intelligence system.
+> **This is a template repository.** Fork it, customize the data sources and asset universe, and build your own narrative intelligence system. This is work in progress, so stay up to date with new commits.
 
 Detects and tracks large-scale financial narratives as they form, mutate, and decay across fragmented media — RSS feeds, SEC filings, Reddit, news APIs. Maps them to S&P 500 tickers, scores their momentum, flags coordinated campaigns, and serves it all through a web dashboard.
 
