@@ -32,6 +32,14 @@ frontend/.next/
 
 # Signal validation charts (regenerated each run)
 signal_validation/*.png
+signal_validation*.png
+
+# Runtime lock file
+pipeline.lock
+
+# Personal tracking/test docs (not part of the template)
+stock_test.md
+personal_*.md
 
 # Logs
 logs/
