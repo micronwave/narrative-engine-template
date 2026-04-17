@@ -88,7 +88,7 @@ class AssetMapper:
         self,
         centroid: np.ndarray,
         top_k: int = 5,
-        min_similarity: float = 0.50,
+        min_similarity: float = 0.60,
         topic_tags: list[str] | None = None,
         sector_map: dict[str, str] | None = None,
     ) -> list[dict]:
@@ -134,6 +134,8 @@ class AssetMapper:
             if sim < min_similarity:
                 continue
             ticker = self._tickers[idx]
+            if ticker.startswith("TOPIC:"):
+                continue  # Skip macro event embeddings — not securities
             # Sector validation: suppress irrelevant sectors for narrow topics
             if allowed_sectors is not None and sector_map:
                 ticker_sector = sector_map.get(ticker)

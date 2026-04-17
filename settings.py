@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     WEBSOCKET_RECONNECT_MAX_DELAY_SECONDS: int = 300
     PRICE_TICK_RETENTION_HOURS: int = 48
 
+    # --- Cohesion EMA smoothing ---
+    COHESION_EMA_ALPHA: float = 0.3   # weight for new-cycle cohesion measurement
+
     # --- Pipeline frequency / burst velocity (F2) ---
     PIPELINE_FREQUENCY_HOURS: int = 4
     BURST_VELOCITY_WINDOW_HOURS: int = 2

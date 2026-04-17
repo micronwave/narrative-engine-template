@@ -274,8 +274,8 @@ TRACKED_SECURITIES = [
      "current_price": None, "price_change_24h": None, "narrative_impact_score": 0},
 ]
 
-# Example stub data — replace with your own
 # NarrativeAssets: placeholder narrative IDs replaced at startup with real DB IDs.
+# Example stub data — replace with your own
 NARRATIVE_ASSETS = [
     {"id": "na-001", "narrative_id": "nar-001", "asset_class_id": "ac-001",
      "exposure_score": 0.92, "direction": "bullish",
@@ -2392,6 +2392,7 @@ def _build_visible_narrative(n: dict, repo, include_full: bool = False, signal_l
         "signal_confidence": round(float(sig.get("confidence") or 0.0), 4) if sig else None,
         "signal_certainty": sig.get("certainty") if sig else None,
         "signal_catalyst_type": sig.get("catalyst_type") if sig else None,
+        "human_review_required": bool(n.get("human_review_required")),
     }
 
 
@@ -5788,3 +5789,73 @@ async def save_dashboard_layout(layout: dict, user: dict = Depends(get_current_u
     repo = get_repo()
     repo.save_dashboard_layout(user["user_id"], layout)
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints
+# ---------------------------------------------------------------------------
+
+def get_admin_user(user: dict = Depends(get_optional_user)) -> dict:
+    """Admin dependency: stub mode allows all, JWT mode requires admin role."""
+    if _AUTH_MODE != "stub" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Requires role: admin")
+    return user
+
+
+@app.get("/api/admin/narrative-quality")
+@limiter.limit("10/minute")
+def admin_narrative_quality(request: Request, user: dict = Depends(get_admin_user)):
+    """Admin endpoint: narrative quality indicators for operator review."""
+    import numpy as np
+
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    actives = repo.get_all_active_narratives()
+
+    # Load centroids for all active narratives
+    name_map = {n["narrative_id"]: n.get("name", "") for n in actives}
+    all_ids = list(name_map.keys())
+    raw_centroids = repo.get_latest_centroids_batch(all_ids)
+    centroids = {}
+    for nid, blob in raw_centroids.items():
+        if len(blob) % 4 == 0 and len(blob) // 4 >= 768:
+            centroids[nid] = np.frombuffer(blob, dtype=np.float32)
+
+    # Pairwise cosine similarity (dot product on L2-normalized vecs)
+    ids = list(centroids.keys())
+    duplicates = []
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            sim = float(np.dot(centroids[ids[i]], centroids[ids[j]]))
+            if sim > 0.80:
+                duplicates.append({
+                    "narrative_a": ids[i],
+                    "narrative_b": ids[j],
+                    "name_a": name_map.get(ids[i], ""),
+                    "name_b": name_map.get(ids[j], ""),
+                    "similarity": round(sim, 3),
+                })
+
+    # Singletons: suspiciously high cohesion and low doc count
+    singletons = [
+        {"narrative_id": n["narrative_id"], "name": n.get("name", ""),
+         "document_count": n.get("document_count") or 0}
+        for n in actives
+        if (n.get("cohesion") or 0) >= 0.999 and (n.get("document_count") or 0) <= 5
+    ]
+
+    # Unlabeled narratives
+    unlabeled_count = sum(1 for n in actives if not n.get("name"))
+
+    # Human review pending
+    human_review_pending = sum(1 for n in actives if n.get("human_review_required"))
+
+    return {
+        "total_active": len(actives),
+        "potential_duplicates": duplicates,
+        "singletons": singletons,
+        "unlabeled_count": unlabeled_count,
+        "human_review_pending": human_review_pending,
+    }

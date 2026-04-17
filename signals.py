@@ -228,10 +228,10 @@ def compute_cohesion(embeddings: list[np.ndarray]) -> float:
     """
     Mean of pairwise cosine similarities among all document embeddings.
     For L2-normalized vectors, cosine similarity = dot product.
-    Returns 1.0 (perfect cohesion) if fewer than 2 embeddings.
+    Returns 0.0 (insufficient data) if fewer than 2 embeddings.
     """
     if len(embeddings) < 2:
-        return 1.0
+        return 0.0
 
     arr = np.array(embeddings, dtype=np.float32)  # (N, D)
     # Cosine similarity matrix via dot product (valid for L2-normalized vecs).
@@ -241,7 +241,7 @@ def compute_cohesion(embeddings: list[np.ndarray]) -> float:
     upper = np.triu_indices(n, k=1)
     pairwise_sims = sim_matrix[upper]
 
-    return float(np.mean(pairwise_sims)) if pairwise_sims.size > 0 else 1.0
+    return float(np.mean(pairwise_sims)) if pairwise_sims.size > 0 else 0.0
 
 
 def compute_polarization(documents: list[str]) -> float:
@@ -320,7 +320,7 @@ def compute_ns_score(
         + 0.15 * centrality
         + 0.10 * entropy_normalized
     )
-    return float(min(ns, 1.0))
+    return float(max(0.0, min(ns, 1.0)))
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +334,7 @@ def get_narrative_age_days(created_at: str) -> int:
         today = datetime.now(timezone.utc).date()
         return max(0, (today - created_date).days)
     except Exception:
+        logger.warning("Could not parse created_at '%s' — defaulting age to 0", created_at)
         return 0
 
 
@@ -342,7 +343,7 @@ def compute_lifecycle_stage(
     document_count: int,
     velocity_windowed: float,
     entropy: float | None,
-    consecutive_declining_days: int,
+    consecutive_declining_cycles: int,
     days_since_creation: int,
     cycles_in_current_stage: int = 0,
 ) -> str:
@@ -353,10 +354,13 @@ def compute_lifecycle_stage(
 
     Rules applied in order:
     1. Revival: Declining/Dormant with velocity > 0.10 → Growing
-    2. Emerging → Growing: document_count >= 8 AND velocity_windowed > 0.05
-    3. Growing → Mature: days >= 5 AND entropy >= 1.5 AND document_count >= 15
-    4. Mature → Declining: consecutive_declining_days >= 5 OR velocity < 0.01
-    5. Declining → Dormant: consecutive_declining_days >= 7 AND velocity < 0.01
+    2. Emerging → Growing: (doc_count >= 8 AND velocity > 0.05)
+       OR age-based fallback (doc_count >= 10 AND age >= 2 days)
+    3. Growing → Mature: (days >= 5 AND entropy >= 1.5 AND doc_count >= 15)
+       OR volume-based fallback (doc_count >= 50 AND age >= 7 days)
+    4. Mature → Declining: consecutive_declining_cycles >= 30
+       OR (consecutive_declining_cycles >= 18 AND velocity < 0.01)
+    5. Declining → Dormant: consecutive_declining_cycles >= 42 AND velocity < 0.01
 
     Hysteresis: transitions (except revival) require >= 3 cycles in current stage.
     Never skips stages (Emerging cannot jump directly to Mature).
@@ -367,28 +371,32 @@ def compute_lifecycle_stage(
 
     # Compute proposed stage from rules
     if current_stage == "Emerging":
-        if document_count >= 8 and velocity_windowed > 0.05:
+        if ((document_count >= 8 and velocity_windowed > 0.05)
+                or (document_count >= 10 and days_since_creation >= 2)):
             proposed = "Growing"
         else:
             proposed = "Emerging"
 
     elif current_stage == "Growing":
-        if (days_since_creation >= 5
+        if ((days_since_creation >= 5
                 and entropy is not None
                 and entropy >= 1.5
-                and document_count >= 15):
+                and document_count >= 15)
+                or (document_count >= 50 and days_since_creation >= 7)):
             proposed = "Mature"
         else:
             proposed = "Growing"
 
     elif current_stage == "Mature":
-        if consecutive_declining_days >= 5 or velocity_windowed < 0.01:
+        if consecutive_declining_cycles >= 30:
+            proposed = "Declining"
+        elif consecutive_declining_cycles >= 18 and velocity_windowed < 0.01:
             proposed = "Declining"
         else:
             proposed = "Mature"
 
     elif current_stage == "Declining":
-        if consecutive_declining_days >= 7 and velocity_windowed < 0.01:
+        if consecutive_declining_cycles >= 42 and velocity_windowed < 0.01:
             proposed = "Dormant"
         else:
             proposed = "Declining"

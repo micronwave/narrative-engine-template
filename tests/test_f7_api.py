@@ -84,7 +84,7 @@ S("F7-U4: invalid lifecycle stage passthrough")
 result = compute_lifecycle_stage(
     current_stage="InvalidStage", document_count=10,
     velocity_windowed=0.05, entropy=1.0,
-    consecutive_declining_days=0, days_since_creation=5,
+    consecutive_declining_cycles=0, days_since_creation=5,
 )
 T("returns 'InvalidStage' unchanged", result == "InvalidStage", f"got {result}")
 
@@ -92,7 +92,7 @@ T("returns 'InvalidStage' unchanged", result == "InvalidStage", f"got {result}")
 result2 = compute_lifecycle_stage(
     current_stage="Emerging", document_count=3,
     velocity_windowed=0.02, entropy=None,
-    consecutive_declining_days=0, days_since_creation=1,
+    consecutive_declining_cycles=0, days_since_creation=1,
 )
 T("Emerging still works", result2 == "Emerging", f"got {result2}")
 

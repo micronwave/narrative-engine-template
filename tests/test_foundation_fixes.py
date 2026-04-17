@@ -57,7 +57,7 @@ from signals import compute_lifecycle_stage
 S("Fix 1: Stage hysteresis — cycles < 3 blocks transition")
 result = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.005,
-    entropy=2.0, consecutive_declining_days=6, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=19, days_since_creation=30,
     cycles_in_current_stage=1,
 )
 T("T1: Mature stays Mature when cycles < 3", result == "Mature", f"got {result}")
@@ -65,7 +65,7 @@ T("T1: Mature stays Mature when cycles < 3", result == "Mature", f"got {result}"
 S("Fix 1: Stage hysteresis — cycles >= 3 allows transition")
 result = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.005,
-    entropy=2.0, consecutive_declining_days=6, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=19, days_since_creation=30,
     cycles_in_current_stage=5,
 )
 T("T2: Mature → Declining when cycles >= 3", result == "Declining", f"got {result}")
@@ -73,7 +73,7 @@ T("T2: Mature → Declining when cycles >= 3", result == "Declining", f"got {res
 S("Fix 1: Stage hysteresis — Dormant→Growing bypasses hysteresis")
 result = compute_lifecycle_stage(
     current_stage="Dormant", document_count=5, velocity_windowed=0.15,
-    entropy=None, consecutive_declining_days=20, days_since_creation=60,
+    entropy=None, consecutive_declining_cycles=20, days_since_creation=60,
     cycles_in_current_stage=0,
 )
 T("T3: Revival allowed immediately (cycles=0)", result == "Growing", f"got {result}")
@@ -82,7 +82,7 @@ S("Fix 1: Stage hysteresis — Mature→Declining thresholds")
 # velocity at 0.015 — was below old threshold 0.02, but above new 0.01
 result_no_decline = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.015,
-    entropy=2.0, consecutive_declining_days=0, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=0, days_since_creation=30,
     cycles_in_current_stage=10,
 )
 T("T4: velocity 0.015 no longer triggers Declining", result_no_decline == "Mature",
@@ -177,7 +177,7 @@ T("T13: Haiku input pricing is $0.80/M",
 S("Audit: Hysteresis boundary — cycles_in_current_stage=2 (still blocked)")
 result_c2 = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.005,
-    entropy=2.0, consecutive_declining_days=6, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=19, days_since_creation=30,
     cycles_in_current_stage=2,
 )
 T("T14: cycles=2 blocks Mature→Declining", result_c2 == "Mature", f"got {result_c2}")
@@ -185,7 +185,7 @@ T("T14: cycles=2 blocks Mature→Declining", result_c2 == "Mature", f"got {resul
 S("Audit: Hysteresis boundary — cycles_in_current_stage=3 (just passes)")
 result_c3 = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.005,
-    entropy=2.0, consecutive_declining_days=6, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=19, days_since_creation=30,
     cycles_in_current_stage=3,
 )
 T("T15: cycles=3 allows Mature→Declining", result_c3 == "Declining", f"got {result_c3}")
@@ -193,7 +193,7 @@ T("T15: cycles=3 allows Mature→Declining", result_c3 == "Declining", f"got {re
 S("Audit: Velocity boundary — exactly 0.01 should NOT trigger Declining")
 result_v01 = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.01,
-    entropy=2.0, consecutive_declining_days=0, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=0, days_since_creation=30,
     cycles_in_current_stage=10,
 )
 T("T16: velocity=0.01 does not trigger Declining", result_v01 == "Mature", f"got {result_v01}")
@@ -201,7 +201,7 @@ T("T16: velocity=0.01 does not trigger Declining", result_v01 == "Mature", f"got
 S("Audit: Revival boundary — velocity exactly 0.10 should NOT revive")
 result_rev = compute_lifecycle_stage(
     current_stage="Declining", document_count=20, velocity_windowed=0.10,
-    entropy=2.0, consecutive_declining_days=5, days_since_creation=20,
+    entropy=2.0, consecutive_declining_cycles=5, days_since_creation=20,
     cycles_in_current_stage=0,
 )
 T("T17: velocity=0.10 does not revive", result_rev == "Declining", f"got {result_rev}")
@@ -209,26 +209,26 @@ T("T17: velocity=0.10 does not revive", result_rev == "Declining", f"got {result
 S("Audit: Dormant stays Dormant when velocity low (no warning expected)")
 result_dorm = compute_lifecycle_stage(
     current_stage="Dormant", document_count=5, velocity_windowed=0.03,
-    entropy=None, consecutive_declining_days=30, days_since_creation=90,
+    entropy=None, consecutive_declining_cycles=30, days_since_creation=90,
     cycles_in_current_stage=50,
 )
 T("T18: Dormant stays Dormant", result_dorm == "Dormant", f"got {result_dorm}")
 
-S("Audit: consecutive_declining_days=5 boundary triggers Declining")
-result_cd5 = compute_lifecycle_stage(
+S("Audit: consecutive_declining_cycles=30 boundary triggers Declining")
+result_cd30 = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.05,
-    entropy=2.0, consecutive_declining_days=5, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=30, days_since_creation=30,
     cycles_in_current_stage=5,
 )
-T("T19: consecutive_declining_days=5 triggers Declining", result_cd5 == "Declining", f"got {result_cd5}")
+T("T19: consecutive_declining_cycles=30 triggers Declining", result_cd30 == "Declining", f"got {result_cd30}")
 
-S("Audit: consecutive_declining_days=4 does NOT trigger Declining")
-result_cd4 = compute_lifecycle_stage(
+S("Audit: consecutive_declining_cycles=29 does NOT trigger Declining")
+result_cd29 = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.05,
-    entropy=2.0, consecutive_declining_days=4, days_since_creation=30,
+    entropy=2.0, consecutive_declining_cycles=29, days_since_creation=30,
     cycles_in_current_stage=5,
 )
-T("T20: consecutive_declining_days=4 stays Mature", result_cd4 == "Mature", f"got {result_cd4}")
+T("T20: consecutive_declining_cycles=29 stays Mature", result_cd29 == "Mature", f"got {result_cd29}")
 
 # ===========================================================================
 # Checkpoint B Tests (Fixes 6-12)

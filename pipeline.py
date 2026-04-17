@@ -16,7 +16,7 @@ import numpy as np
 from adversarial import check_coordination
 from asset_mapper import AssetMapper
 from centrality import build_narrative_graph, compute_centrality, flag_catalysts
-from clustering import run_clustering
+from clustering import deduplicate_new_narratives, run_clustering
 from deduplicator import Deduplicator
 from embedding_model import MiniLMEmbedder
 from ingester import RawDocument, RssIngester
@@ -76,8 +76,91 @@ def _classify_topic_keywords(narrative_name: str, excerpts: list[str]) -> list[s
 
 
 # ---------------------------------------------------------------------------
+# Post-labeling relevance gate (Section 12)
+# ---------------------------------------------------------------------------
+
+_FINANCIAL_KEYWORDS: frozenset[str] = frozenset({
+    "market", "stock", "price", "trade", "invest", "fund",
+    "rate", "inflation", "earnings", "revenue", "gdp",
+    "tariff", "ipo", "m&a", "acquisition", "crypto",
+    "bitcoin", "oil", "commodity", "yield", "bond",
+    "equity", "sector", "portfolio",
+})
+
+
+def check_financial_relevance(
+    name: str, description: str, topic_tags_json: str | None,
+) -> bool:
+    """Return True if the narrative appears financially relevant.
+
+    Checks name+description for financial keywords and topic_tags for any
+    non-empty tag list.  Returns False (should be flagged) only when both
+    checks fail.
+    """
+    combined = (name + " " + description).lower()
+    has_financial = any(kw in combined for kw in _FINANCIAL_KEYWORDS)
+
+    has_investable_tag = False
+    # All tags from classify_topic are investable by construction
+    if topic_tags_json and topic_tags_json not in ("null", "[]"):
+        try:
+            parsed = json.loads(topic_tags_json) if isinstance(topic_tags_json, str) else topic_tags_json
+            has_investable_tag = bool(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return has_financial or has_investable_tag
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _backfill_centroids(
+    repository: "SqliteRepository",
+    vector_store: "FaissVectorStore",
+    emb_dim: int,
+    prefix: str = "",
+) -> int:
+    """Load missing centroid vectors from centroid_history into VectorStore.
+
+    Returns the number of vectors backfilled.
+    """
+    existing_ids = set(vector_store.get_all_ids())
+    active_narratives = repository.get_all_active_narratives()
+    missing_ids = [
+        n["narrative_id"] for n in active_narratives
+        if n["narrative_id"] not in existing_ids
+    ]
+    if not missing_ids:
+        return 0
+    blob_map = repository.get_latest_centroids_batch(missing_ids)
+    backfilled = 0
+    for nid, blob in blob_map.items():
+        try:
+            vec = np.frombuffer(blob, dtype=np.float32).copy()
+        except ValueError:
+            logger.warning(
+                "%sCentroid blob for %s is not valid float32 — skipped",
+                prefix, nid,
+            )
+            continue
+        if vec.shape[0] == emb_dim:
+            vector_store.add(vec.reshape(1, -1), [nid])
+            backfilled += 1
+        else:
+            logger.warning(
+                "%sCentroid dim mismatch for %s: got %d, expected %d — skipped",
+                prefix, nid, vec.shape[0], emb_dim,
+            )
+    if backfilled:
+        logger.info(
+            "%sBackfilled %d/%d missing centroid vectors from centroid_history",
+            prefix, backfilled, len(missing_ids),
+        )
+    return backfilled
+
 
 def _log_step(
     repository: SqliteRepository,
@@ -192,6 +275,12 @@ def run() -> None:
                     _log_step(repository, cycle_id, 0, "initialization", "FATAL",
                               (time.monotonic() - step_start) * 1000, msg)
                     return
+
+        # Backfill centroid vectors from centroid_history for narratives
+        # missing from the VectorStore.  This covers the common case where the
+        # FAISS pickle cannot be deserialised (safe_pickle whitelist) and the
+        # index is re-initialised empty every cycle.
+        _backfill_centroids(repository, vector_store, emb_dim)
 
         # Load or initialize LSH / Deduplicator
         deduplicator = Deduplicator(
@@ -446,12 +535,38 @@ def run() -> None:
                     })
                     buffered_count += 1
             else:
+                # Load IDs of narratives that should never receive documents
+                with repository._get_conn() as conn:
+                    _excluded_ids = {
+                        row[0] for row in conn.execute(
+                            "SELECT narrative_id FROM narratives WHERE suppressed = 1 OR stage = 'Dormant'"
+                        ).fetchall()
+                    }
+
                 for doc in surviving_docs:
                     emb = doc_embeddings[doc.doc_id]
                     distances, ids = vector_store.search(emb, k=1)
 
                     if ids and len(distances) > 0 and float(distances[0]) >= floor:
                         narrative_id = ids[0]
+
+                        if narrative_id in _excluded_ids:
+                            logger.warning("Step 7: skipping excluded narrative %s (stale centroid)", narrative_id)
+                            repository.insert_candidate({
+                                "doc_id": doc.doc_id,
+                                "raw_text": doc.raw_text,
+                                "source_url": doc.source_url,
+                                "source_domain": doc.source_domain,
+                                "published_at": doc.published_at,
+                                "ingested_at": doc.ingested_at,
+                                "author": doc.author,
+                                "raw_text_hash": doc.raw_text_hash,
+                                "embedding_blob": emb.tobytes(),
+                                "status": "pending",
+                                "narrative_id_assigned": None,
+                            })
+                            buffered_count += 1
+                            continue
 
                         # Momentum centroid update
                         old_vec = vector_store.get_vector(narrative_id)
@@ -568,6 +683,38 @@ def run() -> None:
         # Non-fatal: continue
 
     # ------------------------------------------------------------------ #
+    # Step 9.5: Post-Clustering Deduplication                             #
+    # ------------------------------------------------------------------ #
+    step_start = time.monotonic()
+    merged_count = 0
+    try:
+        if new_narrative_ids:
+            surviving_ids = deduplicate_new_narratives(
+                new_narrative_ids, repository, vector_store
+            )
+            merged_count = len(new_narrative_ids) - len(surviving_ids)
+            new_narrative_ids = surviving_ids
+            logger.info(
+                "Step 9.5: post-cluster dedup merged %d, %d survivors",
+                merged_count, len(new_narrative_ids),
+            )
+            if merged_count > 0:
+                try:
+                    vector_store.save()
+                except Exception:
+                    logger.warning("Step 9.5: failed to persist vector store after dedup", exc_info=True)
+
+        step_duration = (time.monotonic() - step_start) * 1000
+        _log_step(repository, cycle_id, 95, "post_cluster_dedup", "OK", step_duration,
+                  f"merged={merged_count}")
+
+    except Exception as exc:
+        step_duration = (time.monotonic() - step_start) * 1000
+        logger.error("Step 9.5 (post-cluster dedup) failed: %s", exc, exc_info=True)
+        _log_step(repository, cycle_id, 95, "post_cluster_dedup", "ERROR", step_duration, str(exc))
+        # Non-fatal: continue with original new_narrative_ids
+
+    # ------------------------------------------------------------------ #
     # Step 10: Compute Signals                                            #
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
@@ -616,28 +763,58 @@ def run() -> None:
             new_embeddings = [doc_embeddings[did] for did in new_doc_ids
                               if did in doc_embeddings]
 
+            ema_alpha = settings.COHESION_EMA_ALPHA
+
             if new_embeddings:
-                cohesion = compute_cohesion(new_embeddings)
+                old_cohesion = min(1.0, max(0.0, float(narrative.get("cohesion") or 0.0)))
+
+                if len(new_embeddings) < 2:
+                    # compute_cohesion returns 0.0 for <2 embeddings —
+                    # use doc-to-centroid similarity as a proxy instead.
+                    centroid = vector_store.get_vector(narrative_id)
+                    if centroid is not None:
+                        cycle_cohesion = min(1.0, max(0.0, float(
+                            np.dot(new_embeddings[0], centroid)
+                        )))
+                        cohesion = ema_alpha * cycle_cohesion + (1 - ema_alpha) * old_cohesion
+                    else:
+                        cohesion = old_cohesion
+                else:
+                    cycle_cohesion = min(1.0, max(0.0, compute_cohesion(new_embeddings)))
+                    if old_cohesion == 0.0 and int(narrative.get("document_count") or 0) == 0:
+                        # Brand new narrative — use raw value
+                        cohesion = cycle_cohesion
+                    else:
+                        # EMA: blend new measurement with historical value
+                        cohesion = ema_alpha * cycle_cohesion + (1 - ema_alpha) * old_cohesion
+
                 new_doc_texts = [e.get("excerpt") or "" for e in evidence
                                  if e.get("doc_id") in set(new_doc_ids)]
-                polarization = compute_polarization(new_doc_texts) if new_doc_texts else 0.0
+                if len(new_doc_texts) >= 2:
+                    polarization = compute_polarization(new_doc_texts)
+                else:
+                    # <2 docs: insufficient for polarization measurement
+                    polarization = float(narrative.get("polarization") or 0.0)
             else:
                 # No new docs this cycle — retain existing values
-                cohesion = float(narrative.get("cohesion") or 1.0)
+                cohesion = min(1.0, max(0.0, float(narrative.get("cohesion") or 0.0)))
                 polarization = float(narrative.get("polarization") or 0.0)
 
             # document_count: existing count + new assignments this cycle
             new_assignment_count = len(new_doc_ids)
             doc_count = int(narrative.get("document_count") or 0) + new_assignment_count
 
-            # Phase 5: Inflow velocity — document arrival rate relative to 7-day average
+            # Baseline doc rate (shared by inflow velocity + burst velocity)
+            freq = max(settings.PIPELINE_FREQUENCY_HOURS, 1)
+            cycles_per_day = 24.0 / freq
             try:
-                baseline_doc_rate = repository.get_baseline_doc_rate(narrative_id, lookback_days=7)
-                avg_docs_per_cycle_7d = baseline_doc_rate if baseline_doc_rate > 0 else float(narrative.get("avg_docs_per_cycle_7d") or 0.0)
-                inflow_vel = compute_inflow_velocity(new_assignment_count, avg_docs_per_cycle_7d)
+                baseline_daily = repository.get_baseline_doc_rate(narrative_id, lookback_days=7)
             except Exception:
-                avg_docs_per_cycle_7d = 0.0
-                inflow_vel = 0.0
+                baseline_daily = 0.0
+
+            # Phase 5: Inflow velocity — document arrival rate relative to 7-day average
+            avg_docs_per_cycle_7d = (baseline_daily / cycles_per_day) if baseline_daily > 0 else float(narrative.get("avg_docs_per_cycle_7d") or 0.0)
+            inflow_vel = compute_inflow_velocity(new_assignment_count, avg_docs_per_cycle_7d)
 
             # Sentiment mean/variance and source count for signal validation
             from signals import compute_sentiment_scores
@@ -680,7 +857,7 @@ def run() -> None:
                 document_count=doc_count,
                 velocity_windowed=velocity_windowed,
                 entropy=entropy,
-                consecutive_declining_days=int(narrative.get("consecutive_declining_days") or 0),
+                consecutive_declining_cycles=int(narrative.get("consecutive_declining_cycles") or 0),
                 days_since_creation=age_days,
                 cycles_in_current_stage=cycles_in_stage,
             )
@@ -691,12 +868,16 @@ def run() -> None:
                 repository.update_narrative(narrative_id, {"cycles_in_current_stage": cycles_in_stage + 1})
 
             # F2: Burst velocity — doc ingestion rate acceleration
+            # (reuses baseline_daily + freq + cycles_per_day from inflow velocity above)
             try:
-                baseline = repository.get_baseline_doc_rate(narrative_id, lookback_days=7)
+                baseline_per_cycle = baseline_daily / cycles_per_day if baseline_daily > 0 else 0.0
+                # Fallback: established narrative with docs but no snapshot history
+                if baseline_per_cycle <= 0 and doc_count > 0:
+                    baseline_per_cycle = max(doc_count / (7.0 * cycles_per_day), 1.0)
                 burst = compute_burst_velocity(
                     recent_doc_count=new_assignment_count,
-                    window_hours=settings.BURST_VELOCITY_WINDOW_HOURS,
-                    baseline_docs_per_window=baseline,
+                    window_hours=settings.PIPELINE_FREQUENCY_HOURS,
+                    baseline_docs_per_window=baseline_per_cycle,
                     alert_ratio=settings.BURST_VELOCITY_ALERT_RATIO,
                 )
                 repository.update_narrative(narrative_id, {"burst_ratio": burst["ratio"]})
@@ -968,68 +1149,103 @@ def run() -> None:
                 )
             )
             if needs_label:
-                evidence = repository.get_document_evidence(narrative_id)
-                # Sanitize excerpts: strip control chars + format markers
-                sanitized_excerpts = []
-                for e in evidence[:5]:
-                    excerpt = (e.get("excerpt") or "")[:200]
-                    for marker in ("NAME:", "DESCRIPTION:", "TAG:", "TAGS:", "SIGNAL_JSON:", "Signal_Json:", "signal_json:"):
-                        excerpt = excerpt.replace(marker, "")
-                    excerpt = strip_control_chars(excerpt)
-                    sanitized_excerpts.append(excerpt)
-                excerpt_text = " ".join(sanitized_excerpts)
-                label_prompt = (
-                    "Analyze this set of financial news excerpts and identify the single "
-                    "underlying narrative theme.\n\n"
-                    f"Excerpts:\n{excerpt_text}\n\n"
-                    "Respond in exactly this format (no extra text):\n"
-                    "NAME: <3-7 word theme label>\n"
-                    "DESCRIPTION: <2 sentences explaining what this narrative claims "
-                    "and why it matters financially>\n"
-                    'SIGNAL_JSON: {"direction":"bullish or bearish or neutral",'
-                    '"confidence":0.0,"timeframe":"immediate or near_term or long_term",'
-                    '"magnitude":"incremental or significant or transformative",'
-                    '"certainty":"speculative or rumored or expected or confirmed",'
-                    '"key_actors":["entity1"],"affected_sectors":["sector1"],'
-                    '"catalyst_type":"earnings or regulatory or geopolitical or macro or corporate"}'
-                )
-                raw_label = llm_client.call_haiku("label_narrative", narrative_id, label_prompt)
-                # Parse structured response
-                name = ""
-                description = ""
-                for line in raw_label.splitlines():
-                    line = line.strip()
-                    if line.startswith("NAME:"):
-                        name = line[5:].strip()[:100]
-                    elif line.startswith("DESCRIPTION:"):
-                        description = line[12:].strip()[:500]
-                if not name:
-                    # Fallback: use first non-JSON, non-marker line as name
-                    for fallback_line in raw_label.splitlines():
-                        fl = fallback_line.strip()
-                        if fl and not fl.startswith("{") and not fl.upper().startswith("SIGNAL_JSON:"):
-                            name = fl[:100]
-                            break
-                    if not name:
-                        name = "Unlabeled Narrative"
-                repository.update_narrative(narrative_id, {
-                    "name": name,
-                    "description": description,
-                })
-                haiku_count += 1
-
-                # Extract signal from combined response (non-fatal)
+                # FIX(health_fix2): Per-narrative try/except — one failure must not
+                # abort labeling for all remaining narratives in the loop.  Prior to
+                # this fix, any exception (DB hiccup, unexpected LLM response, etc.)
+                # in a single narrative's labeling propagated to the outer step-14
+                # try/except, skipping every subsequent narrative.  This was the root
+                # cause of 64 zombie narratives (name IS NULL) accumulating over time.
                 try:
-                    signal_data = parse_signal_json(raw_label)
-                    validated_signal = validate_signal_fields(signal_data)
-                    repository.upsert_narrative_signal({
-                        "narrative_id": narrative_id,
-                        **validated_signal,
-                        "extracted_at": now_iso,
-                        "raw_response": raw_label,
-                    })
-                except Exception as sig_exc:
-                    logger.debug("Signal upsert failed for %s: %s", narrative_id, sig_exc)
+                    evidence = repository.get_document_evidence(narrative_id)
+                    # Sanitize excerpts: strip control chars + format markers
+                    sanitized_excerpts = []
+                    for e in evidence[:5]:
+                        excerpt = (e.get("excerpt") or "")[:200]
+                        for marker in ("NAME:", "DESCRIPTION:", "TAG:", "TAGS:", "SIGNAL_JSON:", "Signal_Json:", "signal_json:"):
+                            excerpt = excerpt.replace(marker, "")
+                        excerpt = strip_control_chars(excerpt)
+                        sanitized_excerpts.append(excerpt)
+                    excerpt_text = " ".join(sanitized_excerpts)
+                    label_prompt = (
+                        "Analyze this set of financial news excerpts and identify the single "
+                        "underlying narrative theme.\n\n"
+                        f"Excerpts:\n{excerpt_text}\n\n"
+                        "Respond in exactly this format (no extra text):\n"
+                        "NAME: <3-7 word theme label>\n"
+                        "DESCRIPTION: <2 sentences explaining what this narrative claims "
+                        "and why it matters financially>\n"
+                        'SIGNAL_JSON: {"direction":"bullish or bearish or neutral",'
+                        '"confidence":0.0,"timeframe":"immediate or near_term or long_term",'
+                        '"magnitude":"incremental or significant or transformative",'
+                        '"certainty":"speculative or rumored or expected or confirmed",'
+                        '"key_actors":["entity1"],"affected_sectors":["sector1"],'
+                        '"catalyst_type":"earnings or regulatory or geopolitical or macro or corporate"}'
+                    )
+                    raw_label = llm_client.call_haiku("label_narrative", narrative_id, label_prompt)
+                    # Parse structured response (case-insensitive prefix matching)
+                    name = ""
+                    description = ""
+                    for line in raw_label.splitlines():
+                        stripped = line.strip()
+                        stripped_upper = stripped.upper()
+                        if stripped_upper.startswith("NAME:"):
+                            name = stripped[5:].strip()[:100]
+                        elif stripped_upper.startswith("DESCRIPTION:"):
+                            description = stripped[12:].strip()[:500]
+                    if not name:
+                        # Fallback: use first non-JSON, non-marker, non-preamble line as name.
+                        # Skip lines ending with ":" (LLM preamble like "Here is my analysis:")
+                        # and lines >60 chars (too long for a 3-7 word theme label).
+                        for fallback_line in raw_label.splitlines():
+                            fl = fallback_line.strip()
+                            if (fl and not fl.startswith("{")
+                                    and not fl.upper().startswith("SIGNAL_JSON:")
+                                    and not fl.upper().startswith("DESCRIPTION:")
+                                    and not fl.endswith(":")
+                                    and len(fl) <= 60):
+                                name = fl[:100]
+                                break
+
+                    # Guard: never persist empty/None labels — leave name as NULL so
+                    # needs_label stays True and the narrative is retried next cycle.
+                    if name and name.strip():
+                        label_updates: dict = {"name": name.strip()}
+                        if description and description.strip():
+                            label_updates["description"] = description.strip()
+                        repository.update_narrative(narrative_id, label_updates)
+                        haiku_count += 1
+
+                        # Post-labeling relevance gate (Section 12):
+                        # Flag non-investable narratives for human review.
+                        if not check_financial_relevance(name, description or "", narrative.get("topic_tags")):
+                            repository.update_narrative(narrative_id, {"human_review_required": 1})
+                            logger.info(
+                                "Narrative %s flagged for human review (name=%r lacks financial relevance)",
+                                narrative_id, name,
+                            )
+
+                        # Extract signal from combined response (non-fatal)
+                        try:
+                            signal_data = parse_signal_json(raw_label)
+                            validated_signal = validate_signal_fields(signal_data)
+                            repository.upsert_narrative_signal({
+                                "narrative_id": narrative_id,
+                                **validated_signal,
+                                "extracted_at": now_iso,
+                                "raw_response": raw_label,
+                            })
+                        except Exception as sig_exc:
+                            logger.debug("Signal upsert failed for %s: %s", narrative_id, sig_exc)
+                    else:
+                        logger.warning(
+                            "Narrative %s: Haiku returned but label extraction failed. Response: %.200s",
+                            narrative_id, raw_label,
+                        )
+                except Exception as label_exc:
+                    logger.warning(
+                        "Narrative %s: labeling failed, will retry next cycle: %s",
+                        narrative_id, label_exc,
+                    )
 
             # Standalone signal extraction for already-labeled narratives with stale/missing signals
             if not needs_label:
@@ -1125,21 +1341,21 @@ def run() -> None:
 
             if stage == "Declining":
                 consecutive_declining = int(
-                    fresh.get("consecutive_declining_days") or 0
+                    fresh.get("consecutive_declining_cycles") or 0
                 ) + 1
             else:
                 consecutive_declining = 0
 
             updates: dict = {
-                "consecutive_declining_days": consecutive_declining,
+                "consecutive_declining_cycles": consecutive_declining,
                 "last_updated_at": now_iso,
             }
 
-            # Noise eviction: Declining > 14 consecutive days AND Ns < 0.20
+            # Noise eviction: Declining > 84 consecutive cycles (~14 days at 4h) AND Ns < 0.20
             ns_current = float(fresh.get("ns_score") or 0.0)
-            if stage == "Declining" and consecutive_declining > 14 and ns_current < 0.20:
+            if stage == "Declining" and consecutive_declining > 84 and ns_current < 0.20:
                 logger.info(
-                    "Evicting narrative %s: %d consecutive declining days, ns=%.3f",
+                    "Evicting narrative %s: %d consecutive declining cycles, ns=%.3f",
                     narrative_id, consecutive_declining, ns_current,
                 )
                 updates["suppressed"] = 1
@@ -1512,6 +1728,53 @@ def run() -> None:
         logger.error("Step 20 (cleanup) failed: %s", exc, exc_info=True)
         _log_step(repository, cycle_id, 20, "cleanup", "ERROR", step_duration, str(exc))
 
+    # ------------------------------------------------------------------ #
+    # Step 21: Quality Metrics                                            #
+    # ------------------------------------------------------------------ #
+    step_start = time.monotonic()
+    try:
+        active_narratives = repository.get_all_active_narratives()
+        active_count = len(active_narratives)
+
+        # Potential duplicates: centroid cosine similarity > 0.80
+        all_ids = [n["narrative_id"] for n in active_narratives]
+        raw_centroids = repository.get_latest_centroids_batch(all_ids)
+        centroids = {}
+        for nid, blob in raw_centroids.items():
+            if len(blob) % 4 == 0 and len(blob) // 4 >= 768:
+                centroids[nid] = np.frombuffer(blob, dtype=np.float32)
+
+        ids = list(centroids.keys())
+        dup_count = 0
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                sim = float(np.dot(centroids[ids[i]], centroids[ids[j]]))
+                if sim > 0.80:
+                    dup_count += 1
+
+        # Singletons: suspiciously high cohesion and low doc count
+        singleton_count = sum(
+            1 for n in active_narratives
+            if (n.get("cohesion") or 0) >= 0.999 and (n.get("document_count") or 0) <= 5
+        )
+
+        # Leak indicator: suppressed narratives still receiving documents
+        leak_count = repository.count_suppressed_with_documents()
+
+        metrics_msg = (
+            f"active={active_count} potential_dupes={dup_count} "
+            f"singletons={singleton_count} suppressed_leak={leak_count}"
+        )
+        logger.info("Step 21: quality metrics — %s", metrics_msg)
+        step_duration = (time.monotonic() - step_start) * 1000
+        _log_step(repository, cycle_id, 21, "quality_metrics", "OK", step_duration, metrics_msg)
+
+    except Exception as exc:
+        step_duration = (time.monotonic() - step_start) * 1000
+        logger.error("Step 21 (quality metrics) failed: %s", exc, exc_info=True)
+        _log_step(repository, cycle_id, 21, "quality_metrics", "ERROR", step_duration, str(exc))
+        # Non-fatal: continue
+
 
 def run_quick() -> dict:
     """
@@ -1534,6 +1797,9 @@ def run_quick() -> dict:
     if not vector_store.load():
         vector_store.initialize(emb_dim)
 
+    # Backfill centroids from DB (same logic as run())
+    _backfill_centroids(repository, vector_store, emb_dim, prefix="run_quick: ")
+
     deduplicator = Deduplicator(
         threshold=settings.LSH_THRESHOLD,
         num_perm=settings.LSH_NUM_PERM,
@@ -1544,8 +1810,9 @@ def run_quick() -> dict:
     refresher = QuickRefresh(settings, repository, vector_store, embedder, deduplicator)
     result = refresher.run()
 
-    # Persist updated deduplicator state
+    # Persist updated deduplicator and vector store state
     deduplicator.save()
+    vector_store.save()
 
     step_duration = (time.monotonic() - step_start) * 1000
     _log_step(

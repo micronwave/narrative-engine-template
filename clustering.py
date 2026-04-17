@@ -190,14 +190,14 @@ def run_clustering(
             "polarization": 0.0,
             "cross_source_score": 0.0,
             "last_assignment_date": today,
-            "consecutive_declining_days": 0,
+            "consecutive_declining_cycles": 0,
         }
         repository.insert_narrative(narrative)
 
         # ------------------------------------------------------------------
         # Optional: validate cluster coherence via Haiku.
         # Builds a sample from the first 6 member excerpts and asks Haiku
-        # whether they form a single coherent financial narrative theme.
+        # whether they form a coherent, ongoing, investable narrative.
         # Response format: "SCORE: 0.0-1.0 | REASON: ..."
         # Clusters scoring < 0.5 are suppressed immediately.
         # Falls back to accepting the cluster on any error.
@@ -210,20 +210,23 @@ def run_clustering(
                     if doc.get("raw_text")
                 )
                 validation_prompt = (
-                    "You are evaluating whether a set of news article excerpts belong to "
-                    "a single coherent financial narrative theme.\n\n"
+                    "Score this cluster on coherence (0.0-1.0). A high-quality narrative must:\n"
+                    "1. Form a single coherent theme (not a grab-bag of unrelated articles)\n"
+                    "2. Describe an ongoing market-relevant trend (not a single isolated event)\n"
+                    "3. Have a plausible financial or investment implication\n"
+                    "Score 0.0 if it fails any criterion.\n\n"
                     "Excerpts:\n"
                     f"{sample_excerpts}\n\n"
-                    "Rate the thematic coherence on a scale of 0.0 (completely unrelated) "
-                    "to 1.0 (tightly focused on one theme).\n"
                     "Respond in exactly this format:\n"
                     "SCORE: <number> | REASON: <one sentence>"
                 )
                 validation_result = llm_client.call_haiku(
                     "validate_cluster", narrative_id, validation_prompt
                 )
-                # Parse score from response
-                coherence_score = 1.0  # default: accept if parse fails
+                # Parse score from response.
+                # Default accept: new clusters get benefit of doubt on parse
+                # failure (contrast cleanup script which defaults to 0.0).
+                coherence_score = 1.0
                 if "SCORE:" in validation_result:
                     score_part = validation_result.split("SCORE:")[1].split("|")[0].strip()
                     try:
@@ -288,3 +291,99 @@ def run_clustering(
         )
 
     return new_narrative_ids
+
+
+def deduplicate_new_narratives(
+    new_ids: list[str],
+    repository: Repository,
+    vector_store: VectorStore,
+    threshold: float = 0.85,
+) -> list[str]:
+    """Compare new narrative centroids against all existing centroids and merge
+    near-duplicates (cosine similarity >= threshold).
+
+    Returns the subset of *new_ids* that survived (were not absorbed).
+    Non-fatal: catches all exceptions and returns *new_ids* unchanged on error.
+    """
+    if not new_ids:
+        return new_ids
+
+    try:
+        new_id_set = set(new_ids)
+        merged_away: set[str] = set()
+
+        # Preload Dormant + suppressed IDs — one query replaces per-match lookups
+        _excluded_ids: set[str] = set()
+        try:
+            with repository._get_conn() as conn:
+                _excluded_ids = {
+                    row[0] for row in conn.execute(
+                        "SELECT narrative_id FROM narratives "
+                        "WHERE suppressed = 1 OR stage = 'Dormant'"
+                    ).fetchall()
+                }
+        except Exception:
+            logger.warning("deduplicate_new_narratives: could not preload exclusions")
+
+        for nid in new_ids:
+            if nid in merged_away:
+                continue
+
+            centroid = vector_store.get_vector(nid)
+            if centroid is None:
+                logger.warning("deduplicate_new_narratives: no centroid for %s — skipping", nid)
+                continue
+
+            distances, match_ids = vector_store.search(centroid, k=10)
+
+            for sim, match_id in zip(distances, match_ids):
+                if match_id == nid:
+                    continue  # self-match
+                if match_id in merged_away:
+                    continue
+                if match_id not in new_id_set and match_id in _excluded_ids:
+                    continue
+                if float(sim) < threshold:
+                    break  # results are sorted descending by similarity
+
+                # Determine survivor vs absorbed
+                if match_id not in new_id_set:
+                    # Existing narrative survives — new one is absorbed
+                    survivor_id, absorbed_id = match_id, nid
+                else:
+                    # Intra-batch: higher document_count survives; ties → first in iteration order
+                    nid_rec = repository.get_narrative(nid)
+                    match_rec = repository.get_narrative(match_id)
+                    nid_count = (nid_rec or {}).get("document_count", 0) or 0
+                    match_count = (match_rec or {}).get("document_count", 0) or 0
+
+                    if match_count > nid_count:
+                        survivor_id, absorbed_id = match_id, nid
+                    else:
+                        survivor_id, absorbed_id = nid, match_id
+
+                logger.info(
+                    "deduplicate_new_narratives: merging %s into %s (sim=%.3f)",
+                    absorbed_id, survivor_id, float(sim),
+                )
+                try:
+                    repository.merge_narrative(survivor_id, absorbed_id, vector_store)
+                    merged_away.add(absorbed_id)
+                except Exception as merge_exc:
+                    logger.warning(
+                        "deduplicate_new_narratives: merge %s->%s failed: %s",
+                        absorbed_id, survivor_id, merge_exc,
+                    )
+                break  # each narrative merges at most once
+
+        survivors = [nid for nid in new_ids if nid not in merged_away]
+        if merged_away:
+            logger.info(
+                "deduplicate_new_narratives: %d merged away, %d survivors",
+                len(merged_away), len(survivors),
+            )
+        return survivors
+
+    except Exception as exc:
+        logger.error("deduplicate_new_narratives failed: %s", exc, exc_info=True)
+        return list(new_ids)

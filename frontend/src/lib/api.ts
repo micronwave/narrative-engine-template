@@ -28,6 +28,7 @@ export type VisibleNarrative = {
   signal_confidence?: number | null;
   signal_certainty?: "speculative" | "rumored" | "expected" | "confirmed" | null;
   signal_catalyst_type?: string | null;
+  human_review_required?: boolean;
   blurred: false;
 };
 

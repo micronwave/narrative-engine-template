@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -169,5 +170,10 @@ def write_outputs(outputs: list[dict], date: str) -> None:
             pass
         raise
 
-    print(serialized.encode("utf-8", errors="replace").decode("utf-8"))
+    try:
+        sys.stdout.buffer.write(serialized.encode('utf-8', errors='replace'))
+        sys.stdout.buffer.write(b'\n')
+        sys.stdout.buffer.flush()
+    except Exception:
+        logger.debug("Skipped stdout echo (encoding not supported)")
     logger.info("Emitted %d narrative(s) to %s", len(outputs), out_path)

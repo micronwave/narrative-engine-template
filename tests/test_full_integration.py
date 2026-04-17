@@ -873,7 +873,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     with patch("anthropic.Anthropic"):
         _llm2 = LlmClient(_TEST_SETTINGS, _g_repo)
@@ -910,7 +910,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     with patch("anthropic.Anthropic"):
         _llm3 = LlmClient(_TEST_SETTINGS, _g_repo)
@@ -947,7 +947,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     # Insert a Sonnet call in last 24h
     _g_repo.log_llm_call({
@@ -995,7 +995,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     # Set daily spend near budget limit
     _today_str = datetime.now(timezone.utc).date().isoformat()
@@ -1045,7 +1045,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     with patch("anthropic.Anthropic"):
         _llm6 = LlmClient(_TEST_SETTINGS, _g6_repo)
@@ -1082,7 +1082,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     with patch("anthropic.Anthropic"):
         _llm7 = LlmClient(_TEST_SETTINGS, _g6_repo)
@@ -1559,7 +1559,7 @@ try:
             "polarization": 0.0,
             "cross_source_score": 0.0,
             "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-            "consecutive_declining_days": 0,
+            "consecutive_declining_cycles": 0,
         })
 
     _j6_warnings = []
@@ -1728,31 +1728,34 @@ except Exception as _e:
 
 # J12-J15: compute_lifecycle_stage lifecycle rules
 try:
-    # J12: Mature → Declining when consecutive_declining_days >= 3
+    # J12: Mature → Declining when consecutive_declining_cycles >= 18 and velocity < 0.01
     _stage12 = compute_lifecycle_stage(
-        current_stage="Mature", document_count=30, velocity_windowed=0.01,
-        entropy=2.0, consecutive_declining_days=4, days_since_creation=10,
+        current_stage="Mature", document_count=30, velocity_windowed=0.005,
+        entropy=2.0, consecutive_declining_cycles=19, days_since_creation=10,
+        cycles_in_current_stage=3,
     )
     T("J12 compute_lifecycle_stage Declining", _stage12 == "Declining")
 
     # J13: Emerging stays Emerging (doc_count < 8)
     _stage13 = compute_lifecycle_stage(
         current_stage="Emerging", document_count=5, velocity_windowed=0.1,
-        entropy=None, consecutive_declining_days=0, days_since_creation=2,
+        entropy=None, consecutive_declining_cycles=0, days_since_creation=2,
     )
     T("J13 compute_lifecycle_stage Emerging", _stage13 == "Emerging")
 
     # J14: Emerging → Growing (doc_count >= 8, velocity > 0.05)
     _stage14 = compute_lifecycle_stage(
         current_stage="Emerging", document_count=10, velocity_windowed=0.5,
-        entropy=1.0, consecutive_declining_days=0, days_since_creation=5,
+        entropy=1.0, consecutive_declining_cycles=0, days_since_creation=5,
+        cycles_in_current_stage=3,
     )
     T("J14 compute_lifecycle_stage Growing", _stage14 == "Growing")
 
     # J15: Growing → Mature (days >= 5, entropy >= 1.5, doc_count >= 15)
     _stage15 = compute_lifecycle_stage(
         current_stage="Growing", document_count=20, velocity_windowed=0.3,
-        entropy=2.0, consecutive_declining_days=0, days_since_creation=10,
+        entropy=2.0, consecutive_declining_cycles=0, days_since_creation=10,
+        cycles_in_current_stage=3,
     )
     T("J15 compute_lifecycle_stage Mature", _stage15 == "Mature")
 
@@ -1883,7 +1886,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": _k_today,
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     _k_repo.insert_centroid_history(_k_nid, _k_today, _k_centroid.tobytes())
     T("K2 narrative created with centroid in VectorStore",
@@ -2077,7 +2080,7 @@ try:
         "polarization": 0.0,
         "cross_source_score": 0.0,
         "last_assignment_date": datetime.now(timezone.utc).date().isoformat(),
-        "consecutive_declining_days": 0,
+        "consecutive_declining_cycles": 0,
     })
     with patch("anthropic.Anthropic") as _mock_ant_m6:
         _mock_ant_m6.return_value = MagicMock()

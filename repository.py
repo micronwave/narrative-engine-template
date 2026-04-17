@@ -1,4 +1,5 @@
 import datetime
+import json
 import logging
 import re
 import sqlite3
@@ -122,12 +123,22 @@ class Repository(ABC):
 
     @abstractmethod
     def get_centroid_history(self, narrative_id: str, days: int, *, limit: int = 0, offset: int = 0) -> list[dict]:
-        """Get centroid history for a narrative, most recent first."""
+        """Get centroid history for a narrative, one entry per date, most recent first."""
         ...
 
     @abstractmethod
     def get_latest_centroid(self, narrative_id: str) -> bytes | None:
         """Get the most recent centroid blob for a narrative."""
+        ...
+
+    @abstractmethod
+    def get_latest_centroids_batch(self, narrative_ids: list[str]) -> dict[str, bytes]:
+        """Get most recent centroid blobs for multiple narratives in one query."""
+        ...
+
+    @abstractmethod
+    def count_suppressed_with_documents(self) -> int:
+        """Count suppressed narratives that still have document assignments."""
         ...
 
     # --- LLM Audit Operations ---
@@ -797,7 +808,7 @@ class SqliteRepository(Repository):
                     polarization REAL DEFAULT 0.0,
                     cross_source_score REAL DEFAULT 0.0,
                     last_assignment_date TEXT,
-                    consecutive_declining_days INTEGER DEFAULT 0
+                    consecutive_declining_cycles INTEGER DEFAULT 0
                 )
             """)
             conn.execute("""
@@ -872,7 +883,8 @@ class SqliteRepository(Repository):
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS pipeline_run_log (
-                    run_id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
                     step_number INTEGER,
                     step_name TEXT,
                     status TEXT,
@@ -881,6 +893,18 @@ class SqliteRepository(Repository):
                     run_at TEXT
                 )
             """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prl_run_id "
+                "ON pipeline_run_log(run_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prl_step "
+                "ON pipeline_run_log(step_name, run_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prl_run_step "
+                "ON pipeline_run_log(run_id, step_number)"
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS narrative_assignments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1443,6 +1467,165 @@ class SqliteRepository(Repository):
                 )
             """)
 
+            # Fix pipeline_run_log: run_id was PRIMARY KEY but multiple steps
+            # share the same run_id per pipeline cycle. Migrate to auto-inc id.
+            try:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type='table' AND name='pipeline_run_log'"
+                ).fetchone()
+                if row and "run_id TEXT PRIMARY KEY" in (row[0] or ""):
+                    conn.execute("""
+                        CREATE TABLE pipeline_run_log_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            run_id TEXT NOT NULL,
+                            step_number INTEGER,
+                            step_name TEXT,
+                            status TEXT,
+                            error_message TEXT,
+                            duration_ms INTEGER,
+                            run_at TEXT
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO pipeline_run_log_new
+                            (run_id, step_number, step_name, status,
+                             error_message, duration_ms, run_at)
+                        SELECT run_id, step_number, step_name, status,
+                               error_message, duration_ms, run_at
+                        FROM pipeline_run_log
+                    """)
+                    conn.execute("DROP TABLE pipeline_run_log")
+                    conn.execute(
+                        "ALTER TABLE pipeline_run_log_new "
+                        "RENAME TO pipeline_run_log"
+                    )
+            except Exception:
+                pass
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prl_run_id "
+                "ON pipeline_run_log(run_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prl_step "
+                "ON pipeline_run_log(step_name, run_at DESC)"
+            )
+
+            # --- Migration: Clean TOPIC: pseudo-tickers from linked_assets ---
+            rows = conn.execute(
+                "SELECT narrative_id, linked_assets FROM narratives "
+                "WHERE linked_assets LIKE '%TOPIC:%'"
+            ).fetchall()
+            if rows:
+                cleaned_count = 0
+                for row in rows:
+                    raw = row[1]
+                    if not raw:
+                        continue
+                    try:
+                        assets = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(assets, list) and assets:
+                        cleaned = []
+                        for a in assets:
+                            if isinstance(a, dict):
+                                if isinstance(a.get("ticker", ""), str) and a["ticker"].startswith("TOPIC:"):
+                                    continue
+                            elif isinstance(a, str) and a.startswith("TOPIC:"):
+                                continue
+                            cleaned.append(a)
+                        if len(cleaned) != len(assets):
+                            conn.execute(
+                                "UPDATE narratives SET linked_assets = ? "
+                                "WHERE narrative_id = ?",
+                                (json.dumps(cleaned), row[0]),
+                            )
+                            cleaned_count += 1
+                if cleaned_count:
+                    logger.info(
+                        "Cleaned TOPIC: pseudo-tickers from %d narratives",
+                        cleaned_count,
+                    )
+
+            # --- Migration: Rename consecutive_declining_days → consecutive_declining_cycles ---
+            columns = {
+                col[1] for col in conn.execute("PRAGMA table_info(narratives)").fetchall()
+            }
+            if "consecutive_declining_cycles" not in columns:
+                try:
+                    conn.execute("ALTER TABLE narratives ADD COLUMN consecutive_declining_cycles INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+            if "consecutive_declining_days" in columns:
+                # Copy non-zero values from old column, then drop it
+                conn.execute("""
+                    UPDATE narratives
+                    SET consecutive_declining_cycles = consecutive_declining_days
+                    WHERE consecutive_declining_days > 0
+                      AND (consecutive_declining_cycles IS NULL OR consecutive_declining_cycles = 0)
+                """)
+                # SQLite ≥ 3.35.0 supports DROP COLUMN
+                try:
+                    conn.execute("ALTER TABLE narratives DROP COLUMN consecutive_declining_days")
+                    logger.info("Dropped legacy column consecutive_declining_days")
+                except Exception:
+                    # Older SQLite — column persists but is unused
+                    logger.debug("Could not drop consecutive_declining_days (SQLite < 3.35)")
+
+            # --- Migration: Remove weak asset links below configured threshold ---
+            # Lazy import to avoid any circular-dependency risk at module load
+            # time (get_settings() is a safe singleton — settings.py has no
+            # project-level imports).
+            from settings import get_settings as _get_settings
+            _weak_floor = _get_settings().ASSET_MAPPING_MIN_SIMILARITY
+
+            weak_rows = conn.execute(
+                "SELECT narrative_id, linked_assets FROM narratives "
+                "WHERE linked_assets IS NOT NULL AND linked_assets != '[]' "
+                "AND linked_assets != 'null'"
+            ).fetchall()
+            weak_cleaned = 0
+            for row in weak_rows:
+                raw = row[1]
+                if not raw:
+                    continue
+                try:
+                    assets = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(assets, list) and assets:
+                    # Single-pass O(n) partition — keep strong links, track weak
+                    # ones separately for per-link audit logging.
+                    filtered = []
+                    removed = []
+                    for a in assets:
+                        if isinstance(a, dict) and a.get("similarity_score", 1.0) < _weak_floor:
+                            removed.append(a)
+                        else:
+                            filtered.append(a)
+                    if removed:
+                        logger.info(
+                            "Narrative %s: removing %d weak asset link(s): %s",
+                            row[0],
+                            len(removed),
+                            ", ".join(
+                                f"{a.get('ticker')}@{a.get('similarity_score', '?')}"
+                                for a in removed
+                            ),
+                        )
+                        conn.execute(
+                            "UPDATE narratives SET linked_assets = ? "
+                            "WHERE narrative_id = ?",
+                            (json.dumps(filtered) if filtered else "[]", row[0]),
+                        )
+                        weak_cleaned += 1
+            if weak_cleaned:
+                logger.info(
+                    "Cleaned weak asset links (< %.2f similarity) from %d narratives",
+                    _weak_floor, weak_cleaned,
+                )
+
     # --- Narrative Operations ---
 
     def get_narrative(self, narrative_id: str) -> dict | None:
@@ -1510,6 +1693,71 @@ class SqliteRepository(Repository):
                 f"UPDATE narratives SET {set_clause} WHERE narrative_id = ?",
                 values,
             )
+
+    def merge_narrative(self, survivor_id: str, absorbed_id: str, vector_store=None) -> None:
+        """Merge absorbed narrative into survivor. Reassign docs, update counts, mark absorbed Dormant.
+
+        Caller must call vector_store.save() after one or more merges to persist centroid deletions.
+        """
+        if survivor_id == absorbed_id:
+            return
+
+        with self._get_conn() as conn:
+            # Validate survivor exists
+            survivor = conn.execute(
+                "SELECT narrative_id FROM narratives WHERE narrative_id = ?",
+                (survivor_id,),
+            ).fetchone()
+            if not survivor:
+                raise ValueError(f"Survivor narrative {survivor_id} does not exist")
+
+            # Validate absorbed exists and check idempotency
+            row = conn.execute(
+                "SELECT stage, description FROM narratives WHERE narrative_id = ?",
+                (absorbed_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Absorbed narrative {absorbed_id} does not exist")
+            if row["stage"] == "Dormant" and "Merged into" in (row["description"] or ""):
+                return  # already merged in a prior run — skip
+
+            # 1. Reassign document_evidence rows
+            conn.execute(
+                "UPDATE document_evidence SET narrative_id = ? WHERE narrative_id = ?",
+                (survivor_id, absorbed_id),
+            )
+
+            # 2. Reassign narrative_assignments rows
+            conn.execute(
+                "UPDATE narrative_assignments SET narrative_id = ? WHERE narrative_id = ?",
+                (survivor_id, absorbed_id),
+            )
+
+            # 3. Update survivor's document_count to combined total
+            combined = conn.execute(
+                "SELECT COUNT(*) as cnt FROM document_evidence WHERE narrative_id = ?",
+                (survivor_id,),
+            ).fetchone()
+            conn.execute(
+                "UPDATE narratives SET document_count = ? WHERE narrative_id = ?",
+                (combined["cnt"], survivor_id),
+            )
+
+            # 4. Preserve existing description, append merge note
+            old_desc = row["description"] or ""
+            merge_note = f"Merged into {survivor_id}"
+            new_desc = f"{old_desc} | {merge_note}" if old_desc else merge_note
+            conn.execute(
+                "UPDATE narratives SET stage = 'Dormant', description = ?, document_count = 0 WHERE narrative_id = ?",
+                (new_desc, absorbed_id),
+            )
+
+        # 5. Remove absorbed centroid from vector store (outside transaction)
+        if vector_store is not None:
+            try:
+                vector_store.delete(absorbed_id)
+            except Exception as exc:
+                logger.warning("Failed to delete centroid for %s: %s", absorbed_id, exc)
 
     def update_narrative_tags(self, narrative_id: str, tags: list) -> None:
         """Store topic tags as JSON array string."""
@@ -1632,9 +1880,15 @@ class SqliteRepository(Repository):
             datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
         ).isoformat()[:10]  # date portion
         with self._get_conn() as conn:
+            # Deduplicate to one entry per date (latest by rowid) so that
+            # velocity compares distinct days, not same-day pipeline runs.
             sql = """
-                SELECT * FROM centroid_history
-                WHERE narrative_id = ? AND date >= ?
+                SELECT id, narrative_id, date, centroid_blob FROM (
+                    SELECT id, narrative_id, date, centroid_blob,
+                           ROW_NUMBER() OVER (PARTITION BY date ORDER BY id DESC) AS rn
+                    FROM centroid_history
+                    WHERE narrative_id = ? AND date >= ?
+                ) WHERE rn = 1
                 ORDER BY date DESC
             """
             params: list = [narrative_id, cutoff]
@@ -1656,6 +1910,43 @@ class SqliteRepository(Repository):
                 (narrative_id,),
             ).fetchone()
             return row[0] if row else None
+
+    def get_latest_centroids_batch(self, narrative_ids: list[str]) -> dict[str, bytes]:
+        """Get most recent centroid blobs for multiple narratives in one query."""
+        if not narrative_ids:
+            return {}
+        result: dict[str, bytes] = {}
+        _CHUNK = 500
+        with self._get_conn() as conn:
+            for i in range(0, len(narrative_ids), _CHUNK):
+                chunk = narrative_ids[i:i + _CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT narrative_id, centroid_blob FROM (
+                        SELECT narrative_id, centroid_blob,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY narrative_id ORDER BY date DESC
+                               ) AS rn
+                        FROM centroid_history
+                        WHERE narrative_id IN ({placeholders})
+                    ) WHERE rn = 1
+                    """,
+                    chunk,
+                ).fetchall()
+                result.update({r[0]: r[1] for r in rows})
+        return result
+
+    def count_suppressed_with_documents(self) -> int:
+        """Count suppressed narratives receiving documents in the last 3 days (leak indicator)."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT n.narrative_id) FROM narratives n "
+                "JOIN narrative_assignments na ON n.narrative_id = na.narrative_id "
+                "WHERE n.suppressed = 1 "
+                "AND na.assigned_at >= DATE('now', '-3 days')"
+            ).fetchone()
+            return row[0] if row else 0
 
     # --- LLM Audit Operations ---
 
