@@ -5,10 +5,24 @@ REM Task Scheduler: Create Basic Task → Trigger: Daily, Repeat every 4 hours �
 cd /d %~dp0
 if not exist logs mkdir logs
 
-REM Prevent concurrent execution
+REM Stale-lock threshold. Scheduler runs every 4h and a typical pipeline cycle
+REM takes ~3 min (10 min worst case), so any lock older than this is orphaned
+REM from a crashed run and safe to clear.
+set "STALE_LOCK_HOURS=6"
+
+REM Concurrent-run guard with self-healing stale-lock recovery
 if exist pipeline.lock (
-    echo Pipeline already running, skipping. >> logs\pipeline_skip.log
-    exit /b 0
+    REM Check lock age via file mtime (locale-independent, unlike %date% %time%)
+    REM PowerShell exit code: 0 = stale (clear and proceed), 1 = fresh (skip)
+    powershell -NoProfile -Command "$l = Get-Item 'pipeline.lock' -ErrorAction SilentlyContinue; if ($l -and $l.LastWriteTime -lt (Get-Date).AddHours(-%STALE_LOCK_HOURS%)) { exit 0 } else { exit 1 }"
+    if errorlevel 1 (
+        REM Fresh lock — another run is active, skip this cycle
+        for %%F in (pipeline.lock) do echo %date% %time% skip [fresh lock from %%~tF] >> logs\pipeline_skip.log
+        exit /b 0
+    )
+    REM Stale lock — previous run crashed before cleanup. Log and clear.
+    for %%F in (pipeline.lock) do echo %date% %time% cleared stale lock [from %%~tF, threshold %STALE_LOCK_HOURS%h] >> logs\pipeline_skip.log
+    del pipeline.lock
 )
 echo %date% %time% > pipeline.lock
 
