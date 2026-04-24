@@ -1346,6 +1346,12 @@ class SqliteRepository(Repository):
             except Exception:
                 pass
 
+            # Health Fix 7v4: track repeated labeling failures on narratives
+            try:
+                conn.execute("ALTER TABLE narratives ADD COLUMN labeling_attempts INTEGER DEFAULT 0")
+            except Exception:
+                pass
+
             # Foundation Fix 3: conditional HTTP for RSS feeds
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS feed_metadata (

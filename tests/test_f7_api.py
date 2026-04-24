@@ -121,9 +121,9 @@ T("HDBSCAN_MIN_CLUSTER_SIZE exists", hasattr(s, "HDBSCAN_MIN_CLUSTER_SIZE"),
   f"value={getattr(s, 'HDBSCAN_MIN_CLUSTER_SIZE', 'MISSING')}")
 T("HDBSCAN_MIN_SAMPLES exists", hasattr(s, "HDBSCAN_MIN_SAMPLES"),
   f"value={getattr(s, 'HDBSCAN_MIN_SAMPLES', 'MISSING')}")
-T("HDBSCAN_MIN_CLUSTER_SIZE default is 5", s.HDBSCAN_MIN_CLUSTER_SIZE == 5,
+T("HDBSCAN_MIN_CLUSTER_SIZE default is 8", s.HDBSCAN_MIN_CLUSTER_SIZE == 8,
   f"value={s.HDBSCAN_MIN_CLUSTER_SIZE}")
-T("HDBSCAN_MIN_SAMPLES default is 3", s.HDBSCAN_MIN_SAMPLES == 3,
+T("HDBSCAN_MIN_SAMPLES default is 5", s.HDBSCAN_MIN_SAMPLES == 5,
   f"value={s.HDBSCAN_MIN_SAMPLES}")
 
 # ===========================================================================

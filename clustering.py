@@ -9,6 +9,7 @@ import numpy as np
 from embedding_model import EmbeddingModel
 from repository import Repository
 from settings import Settings
+from signals import get_narrative_age_days
 from vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -297,7 +298,7 @@ def deduplicate_new_narratives(
     new_ids: list[str],
     repository: Repository,
     vector_store: VectorStore,
-    threshold: float = 0.85,
+    threshold: float = 0.80,
 ) -> list[str]:
     """Compare new narrative centroids against all existing centroids and merge
     near-duplicates (cosine similarity >= threshold).
@@ -387,3 +388,131 @@ def deduplicate_new_narratives(
     except Exception as exc:
         logger.error("deduplicate_new_narratives failed: %s", exc, exc_info=True)
         return list(new_ids)
+
+
+def periodic_narrative_dedup(
+    repository: Repository,
+    vector_store: VectorStore,
+    threshold: float = 0.85,
+    min_age_days_skip: int = 7,
+    min_docs_skip: int = 100,
+) -> int:
+    """Full pairwise dedup across all active narratives.
+
+    Skips pairs where BOTH narratives are older than min_age_days_skip
+    AND both have more than min_docs_skip documents — these are established
+    narratives with potentially drifted centroids, not true duplicates.
+
+    Returns number of narratives merged.
+    """
+    try:
+        active = repository.get_all_active_narratives()
+        active = [
+            n for n in active
+            if (n.get("name") or "").strip() not in ("", "None")
+        ]
+
+        if len(active) < 2:
+            return 0
+
+        centroids: dict[str, np.ndarray] = {}
+        records: dict[str, dict] = {}
+
+        for narrative in active:
+            narrative_id = narrative["narrative_id"]
+            records[narrative_id] = narrative
+            vec = vector_store.get_vector(narrative_id)
+            if vec is None:
+                logger.warning(
+                    "periodic_narrative_dedup: no centroid for %s — skipping",
+                    narrative_id,
+                )
+                continue
+
+            arr = np.asarray(vec, dtype=np.float32).copy()
+            norm = float(np.linalg.norm(arr))
+            if norm <= 0.0:
+                logger.warning(
+                    "periodic_narrative_dedup: zero-norm centroid for %s — skipping",
+                    narrative_id,
+                )
+                continue
+            if abs(norm - 1.0) > 1e-6:
+                arr = arr / norm
+            centroids[narrative_id] = arr
+
+        if len(centroids) < 2:
+            return 0
+
+        merged_ids: set[str] = set()
+        merge_count = 0
+
+        for i, narrative_1 in enumerate(active):
+            narrative_id_1 = narrative_1["narrative_id"]
+            if narrative_id_1 in merged_ids or narrative_id_1 not in centroids:
+                continue
+
+            rec_1 = records.get(narrative_id_1) or repository.get_narrative(narrative_id_1)
+            if not rec_1:
+                continue
+
+            docs_1 = int(rec_1.get("document_count") or 0)
+            age_1 = get_narrative_age_days(rec_1.get("created_at", ""))
+
+            for narrative_2 in active[i + 1:]:
+                narrative_id_2 = narrative_2["narrative_id"]
+                if narrative_id_2 in merged_ids or narrative_id_2 not in centroids:
+                    continue
+
+                rec_2 = records.get(narrative_id_2) or repository.get_narrative(narrative_id_2)
+                if not rec_2:
+                    continue
+
+                docs_2 = int(rec_2.get("document_count") or 0)
+                age_2 = get_narrative_age_days(rec_2.get("created_at", ""))
+
+                if (
+                    age_1 >= min_age_days_skip and age_2 >= min_age_days_skip
+                    and docs_1 >= min_docs_skip and docs_2 >= min_docs_skip
+                ):
+                    continue
+
+                sim = float(np.dot(centroids[narrative_id_1], centroids[narrative_id_2]))
+                if sim < threshold:
+                    continue
+
+                if docs_1 >= docs_2:
+                    survivor_id, absorbed_id = narrative_id_1, narrative_id_2
+                    survivor_name, absorbed_name = rec_1.get("name"), rec_2.get("name")
+                else:
+                    survivor_id, absorbed_id = narrative_id_2, narrative_id_1
+                    survivor_name, absorbed_name = rec_2.get("name"), rec_1.get("name")
+
+                try:
+                    repository.merge_narrative(survivor_id, absorbed_id, vector_store)
+                    merged_ids.add(absorbed_id)
+                    merge_count += 1
+                    logger.info(
+                        "periodic_narrative_dedup: merged %s into %s (sim=%.3f)",
+                        absorbed_name, survivor_name, sim,
+                    )
+
+                    refreshed_survivor = repository.get_narrative(survivor_id)
+                    if refreshed_survivor is not None:
+                        records[survivor_id] = refreshed_survivor
+                        if survivor_id == narrative_id_1:
+                            rec_1 = refreshed_survivor
+                            docs_1 = int(refreshed_survivor.get("document_count") or 0)
+                    if absorbed_id == narrative_id_1:
+                        break
+                except Exception as exc:
+                    logger.error(
+                        "periodic_narrative_dedup: failed to merge %s into %s: %s",
+                        absorbed_id, survivor_id, exc,
+                    )
+
+        return merge_count
+
+    except Exception as exc:
+        logger.error("periodic_narrative_dedup failed: %s", exc, exc_info=True)
+        return 0

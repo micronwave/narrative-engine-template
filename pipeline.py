@@ -16,7 +16,7 @@ import numpy as np
 from adversarial import check_coordination
 from asset_mapper import AssetMapper
 from centrality import build_narrative_graph, compute_centrality, flag_catalysts
-from clustering import deduplicate_new_narratives, run_clustering
+from clustering import deduplicate_new_narratives, periodic_narrative_dedup, run_clustering
 from deduplicator import Deduplicator
 from embedding_model import MiniLMEmbedder
 from ingester import RawDocument, RssIngester
@@ -94,8 +94,7 @@ def check_financial_relevance(
     """Return True if the narrative appears financially relevant.
 
     Checks name+description for financial keywords and topic_tags for any
-    non-empty tag list.  Returns False (should be flagged) only when both
-    checks fail.
+    non-empty tag list. Returns True only when both checks succeed.
     """
     combined = (name + " " + description).lower()
     has_financial = any(kw in combined for kw in _FINANCIAL_KEYWORDS)
@@ -109,7 +108,37 @@ def check_financial_relevance(
         except (json.JSONDecodeError, TypeError):
             pass
 
-    return has_financial or has_investable_tag
+    return has_financial and has_investable_tag
+
+
+def _flag_post_label_review(
+    repository: "SqliteRepository",
+    narrative_id: str,
+    narrative: dict,
+    name: str,
+    description: str,
+    topic_tags_json: str | None,
+) -> None:
+    """Flag a labeled narrative for review when it is non-financial or single-source."""
+    review_required = bool(narrative.get("human_review_required"))
+
+    if not review_required and not check_financial_relevance(name, description or "", topic_tags_json):
+        repository.update_narrative(narrative_id, {"human_review_required": 1})
+        review_required = True
+        logger.info(
+            "Narrative %s flagged for human review (name=%r lacks financial relevance)",
+            narrative_id,
+            name,
+        )
+
+    source_count = int(narrative.get("source_count") or 0)
+    if source_count == 1 and not review_required:
+        repository.update_narrative(narrative_id, {"human_review_required": 1})
+        logger.info(
+            "Narrative %s flagged for human review (single source domain, source_count=%d)",
+            narrative_id,
+            source_count,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +238,46 @@ def _load_centroid_history_vecs(
             except Exception:
                 pass
     return vecs
+
+
+def _handle_failed_labeling_attempt(
+    repository: SqliteRepository,
+    vector_store: FaissVectorStore,
+    narrative: dict,
+    needs_label: bool,
+    label_persisted: bool,
+    now_iso: str,
+) -> bool:
+    """Track a failed labeling attempt and retire after three misses."""
+    if not needs_label or label_persisted:
+        return False
+
+    narrative_id = narrative["narrative_id"]
+    attempts = int(narrative.get("labeling_attempts") or 0) + 1
+
+    if attempts >= 3:
+        repository.update_narrative(narrative_id, {
+            "stage": "Dormant",
+            "labeling_attempts": attempts,
+            "description": f"Auto-retired: labeling failed after {attempts} attempts",
+            "last_updated_at": now_iso,
+        })
+        try:
+            vector_store.delete(narrative_id)
+        except Exception:
+            pass
+        logger.warning(
+            "Narrative %s retired after %d failed labeling attempts",
+            narrative_id, attempts,
+        )
+        return True
+
+    repository.update_narrative(narrative_id, {"labeling_attempts": attempts})
+    logger.info(
+        "Narrative %s: labeling attempt %d failed, will retry (%d remaining)",
+        narrative_id, attempts, 3 - attempts,
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +784,61 @@ def run() -> None:
         # Non-fatal: continue with original new_narrative_ids
 
     # ------------------------------------------------------------------ #
+    # Step 9.6: Periodic Full-Sweep Deduplication                        #
+    # ------------------------------------------------------------------ #
+    step_start = time.monotonic()
+    sweep_merged = 0
+    try:
+        with repository._get_conn() as conn:
+            run_count = conn.execute(
+                "SELECT COUNT(*) FROM pipeline_run_log WHERE step_number = 0"
+            ).fetchone()[0]
+
+        if run_count > 0 and run_count % 6 == 0:
+            sweep_merged = periodic_narrative_dedup(repository, vector_store)
+            if sweep_merged > 0:
+                try:
+                    vector_store.save()
+                except Exception:
+                    logger.warning(
+                        "Step 9.6: failed to persist vector store after periodic dedup",
+                        exc_info=True,
+                    )
+                logger.info(
+                    "Step 9.6: periodic dedup sweep merged %d narratives",
+                    sweep_merged,
+                )
+            else:
+                logger.info("Step 9.6: periodic dedup sweep found no merges")
+        else:
+            logger.info("Step 9.6: periodic dedup skipped (run_count=%d)", run_count)
+
+        step_duration = (time.monotonic() - step_start) * 1000
+        _log_step(
+            repository,
+            cycle_id,
+            96,
+            "periodic_dedup",
+            "OK",
+            step_duration,
+            f"run_count={run_count} merged={sweep_merged}",
+        )
+
+    except Exception as exc:
+        step_duration = (time.monotonic() - step_start) * 1000
+        logger.error("Step 9.6 (periodic dedup) failed: %s", exc, exc_info=True)
+        _log_step(
+            repository,
+            cycle_id,
+            96,
+            "periodic_dedup",
+            "ERROR",
+            step_duration,
+            str(exc),
+        )
+        # Non-fatal: continue
+
+    # ------------------------------------------------------------------ #
     # Step 10: Compute Signals                                            #
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
@@ -1131,6 +1255,7 @@ def run() -> None:
     try:
         active_narratives = repository.get_all_active_narratives()
         haiku_count = 0
+        vs_dirty = False
 
         for narrative in active_narratives:
             narrative_id = narrative["narrative_id"]
@@ -1155,6 +1280,7 @@ def run() -> None:
                 # in a single narrative's labeling propagated to the outer step-14
                 # try/except, skipping every subsequent narrative.  This was the root
                 # cause of 64 zombie narratives (name IS NULL) accumulating over time.
+                label_persisted = False
                 try:
                     evidence = repository.get_document_evidence(narrative_id)
                     # Sanitize excerpts: strip control chars + format markers
@@ -1213,16 +1339,8 @@ def run() -> None:
                         if description and description.strip():
                             label_updates["description"] = description.strip()
                         repository.update_narrative(narrative_id, label_updates)
+                        label_persisted = True
                         haiku_count += 1
-
-                        # Post-labeling relevance gate (Section 12):
-                        # Flag non-investable narratives for human review.
-                        if not check_financial_relevance(name, description or "", narrative.get("topic_tags")):
-                            repository.update_narrative(narrative_id, {"human_review_required": 1})
-                            logger.info(
-                                "Narrative %s flagged for human review (name=%r lacks financial relevance)",
-                                narrative_id, name,
-                            )
 
                         # Extract signal from combined response (non-fatal)
                         try:
@@ -1246,6 +1364,17 @@ def run() -> None:
                         "Narrative %s: labeling failed, will retry next cycle: %s",
                         narrative_id, label_exc,
                     )
+
+                if _handle_failed_labeling_attempt(
+                    repository,
+                    vector_store,
+                    narrative,
+                    needs_label,
+                    label_persisted,
+                    now_iso,
+                ):
+                    vs_dirty = True
+                    continue
 
             # Standalone signal extraction for already-labeled narratives with stale/missing signals
             if not needs_label:
@@ -1335,8 +1464,18 @@ def run() -> None:
                     repository.update_narrative_tags(narrative_id, tags)
                     logger.info("Narrative %s topics: %s", narrative_id, tags)
 
-            # Re-fetch to get stage already computed by Step 10 (compute_lifecycle_stage)
+            # Re-fetch to get stage and any topic_tags persisted this cycle.
+            # Also run the relevance gate here so it sees freshly-classified tags.
             fresh = repository.get_narrative(narrative_id) or narrative
+            if label_persisted:
+                _flag_post_label_review(
+                    repository,
+                    narrative_id,
+                    fresh,
+                    fresh.get("name") or "",
+                    fresh.get("description") or "",
+                    fresh.get("topic_tags"),
+                )
             stage = fresh.get("stage") or "Emerging"
 
             if stage == "Declining":
@@ -1369,6 +1508,15 @@ def run() -> None:
                 continue
 
             repository.update_narrative(narrative_id, updates)
+
+        if vs_dirty:
+            try:
+                vector_store.save()
+            except Exception:
+                logger.warning(
+                    "Step 14: failed to persist vector store after failed-label retirements",
+                    exc_info=True,
+                )
 
         logger.info("Step 14: Haiku labeling — %d calls", haiku_count)
         step_duration = (time.monotonic() - step_start) * 1000

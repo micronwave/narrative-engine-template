@@ -15,6 +15,7 @@ import os
 import random
 import re
 import secrets
+import sqlite3
 import stat
 import sys
 import threading
@@ -118,6 +119,10 @@ _AUTH_MODE = os.environ.get("AUTH_MODE", "stub")
 
 # Environment: "development" or "production" — controls HSTS + HTTPS redirect
 _ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+_DISABLE_BACKGROUND_TASKS = (
+    os.environ.get("DISABLE_BACKGROUND_TASKS", "").lower() in ("1", "true", "yes")
+    or Path(sys.argv[0]).stem.lower().startswith("test_")
+)
 
 # ---------------------------------------------------------------------------
 # Audit: shared-state lock, input validators, CSV sanitizer
@@ -154,6 +159,10 @@ def _extract_ip(request: Request) -> str:
 def _generate_csrf_token() -> str:
     """Generate a random CSRF token."""
     return secrets.token_hex(32)
+
+
+def _background_tasks_enabled() -> bool:
+    return not _DISABLE_BACKGROUND_TASKS
 
 
 def _validate_symbol(symbol: str) -> str:
@@ -552,7 +561,7 @@ async def start_price_refresh():
         print(f"[Startup] Discovered {len(_DYNAMIC_SECURITIES)} dynamic tickers: "
               f"{list(_DYNAMIC_SECURITIES.keys())[:10]}...")
 
-    if finnhub.is_enabled():
+    if finnhub.is_enabled() and _background_tasks_enabled():
         asyncio.create_task(_price_refresh_loop())
     else:
         print("[Finnhub] API key not set — price refresh disabled")
@@ -887,7 +896,8 @@ def calculate_narrative_impact_scores(
 @app.on_event("startup")
 async def start_impact_score_refresh():
     """Start background narrative impact score computation loop."""
-    asyncio.create_task(_impact_score_loop())
+    if _background_tasks_enabled():
+        asyncio.create_task(_impact_score_loop())
 
 
 async def _impact_score_loop():
@@ -925,7 +935,8 @@ async def _impact_score_loop():
 @app.on_event("startup")
 async def start_analytics_bg_refresh():
     """Start background analytics pre-computation loop (lead-time + contrarian)."""
-    asyncio.create_task(_analytics_bg_loop())
+    if _background_tasks_enabled():
+        asyncio.create_task(_analytics_bg_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -974,17 +985,19 @@ async def start_websocket_relay():
     initial_symbols = [s["symbol"] for s in TRACKED_SECURITIES]
     _ws_relay.update_symbols(initial_symbols)
 
-    asyncio.create_task(_ws_relay.start(update_callback=_ws_price_update_callback))
-    asyncio.create_task(_tick_flush_loop())
-    asyncio.create_task(_tick_retention_loop())
-    print(f"[WS Relay] Started — subscribing to up to {symbols_limit} symbols")
+    if _background_tasks_enabled():
+        asyncio.create_task(_ws_relay.start(update_callback=_ws_price_update_callback))
+        asyncio.create_task(_tick_flush_loop())
+        asyncio.create_task(_tick_retention_loop())
+        print(f"[WS Relay] Started — subscribing to up to {symbols_limit} symbols")
 
 
 @app.on_event("startup")
 async def _init_sse():
     global _sse_lock
     _sse_lock = asyncio.Lock()
-    asyncio.create_task(_sse_broadcast_loop())
+    if _background_tasks_enabled():
+        asyncio.create_task(_sse_broadcast_loop())
 
 
 async def _sse_broadcast_loop():
@@ -1000,7 +1013,8 @@ async def _sse_broadcast_loop():
 
 @app.on_event("startup")
 async def _init_login_cleanup():
-    asyncio.create_task(_cleanup_login_attempts())
+    if _background_tasks_enabled():
+        asyncio.create_task(_cleanup_login_attempts())
 
 
 async def _cleanup_login_attempts():
@@ -1021,7 +1035,8 @@ async def start_sentiment_refresh():
     repo = get_repo()
     if repo is not None:
         _sentiment_aggregator = SentimentAggregator(repo, _stocktwits_adapter, finnhub)
-    asyncio.create_task(_sentiment_refresh_loop())
+    if _background_tasks_enabled():
+        asyncio.create_task(_sentiment_refresh_loop())
 
 
 @app.on_event("startup")
@@ -1038,7 +1053,8 @@ async def start_alert_engine():
             except Exception as e:
                 print(f"[AlertEngine] Error: {e}")
             await asyncio.sleep(30)
-    asyncio.create_task(_alert_loop())
+    if _background_tasks_enabled():
+        asyncio.create_task(_alert_loop())
 
 
 @app.on_event("startup")
@@ -1474,9 +1490,20 @@ def get_repo():
         return None
     from repository import SqliteRepository
     repo = SqliteRepository(DB_PATH)
-    repo.migrate()
-    _repo_instance = repo
-    return repo
+    last_exc = None
+    for attempt in range(5):
+        try:
+            repo.migrate()
+            _repo_instance = repo
+            return repo
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            if "locked" not in str(exc).lower() or attempt == 4:
+                raise
+            _time.sleep(0.2 * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+    return None
 
 
 # ---------------------------------------------------------------------------

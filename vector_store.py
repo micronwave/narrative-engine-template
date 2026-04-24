@@ -113,7 +113,8 @@ class FaissVectorStore(VectorStore):
                 "numpy": {"ndarray", "dtype", "float64", "float32", "int64"},
                 "numpy.core.multiarray": {"scalar", "_reconstruct"},
                 "numpy._core.multiarray": {"scalar", "_reconstruct"},
-                # FAISS index types — discover via logging technique in safe_pickle.py
+                "faiss.swigfaiss_avx2": {"IndexFlatIP"},
+                "faiss.swigfaiss": {"IndexFlatIP"},
             })
             if not isinstance(loaded, tuple) or len(loaded) != 3:
                 raise TypeError(

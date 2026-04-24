@@ -14,6 +14,7 @@ Unit:
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 _ROOT = str(Path(__file__).parent.parent)
 if _ROOT not in sys.path:
@@ -181,8 +182,17 @@ with TestClient(app) as client:
 S("F1 utility: get_narrative_age_days")
 age = get_narrative_age_days("2026-03-15T05:49:39.618361+00:00")
 T("returns positive int for past date", age >= 0, f"age={age}")
-age_bad = get_narrative_age_days("invalid")
+with patch("signals.logger.warning") as _warn:
+    age_bad = get_narrative_age_days("invalid")
 T("returns 0 for invalid date", age_bad == 0, f"age={age_bad}")
+T("logs warning for invalid date", _warn.called, "expected logger.warning call")
+if _warn.call_args:
+    _warn_args, _warn_kwargs = _warn.call_args
+    T(
+        "warning includes parse failure context",
+        "Could not parse created_at" in str(_warn_args[0]) and _warn_args[1] == "invalid",
+        f"args={_warn_args}, kwargs={_warn_kwargs}",
+    )
 
 # ===========================================================================
 # Summary

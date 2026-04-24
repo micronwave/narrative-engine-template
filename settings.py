@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # --- Narrative tracking ---
     CENTROID_ALPHA: float = 0.15
     NOISE_BUFFER_THRESHOLD: int = 300
-    ASSIGNMENT_SIMILARITY_FLOOR: float = 0.45
+    ASSIGNMENT_SIMILARITY_FLOOR: float = 0.55
     CONFIDENCE_ESCALATION_THRESHOLD: float = 0.35
     VELOCITY_WINDOW_DAYS: int = 7
     ENTROPY_VOCAB_WINDOW: int = 10
