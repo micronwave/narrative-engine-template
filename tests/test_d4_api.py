@@ -10,9 +10,9 @@ Unit:
   D4-U5: GET /api/manipulation?min_confidence=0.7 excludes indicators with confidence < 0.7
   D4-U6: GET /api/manipulation?status=active returns only items with active status indicators
   D4-U7: GET /api/narratives/{id}/manipulation returns indicators for that narrative
-  D4-U8: GET /api/credits still returns valid response (backend preserved)
-  D4-U9: POST /api/credits/use still returns valid response (backend preserved)
-  D4-U10: GET /api/subscription still returns valid response (backend preserved)
+  D4-U8: GET /api/credits returns 404 (monetization removed)
+  D4-U9: POST /api/credits/use returns 404 (monetization removed)
+  D4-U10: GET /api/subscription returns 404 (monetization removed)
 """
 
 import sys
@@ -170,42 +170,28 @@ with TestClient(app) as client:
     T("unknown narrative returns []", resp2.json() == [])
 
 # ===========================================================================
-# D4-U8: GET /api/credits still returns valid response (backend preserved)
+# D4-U8: GET /api/credits returns 404 (removed)
 # ===========================================================================
-S("D4-U8: GET /api/credits still works")
+S("D4-U8: GET /api/credits removed")
 with TestClient(app) as client:
     resp = client.get("/api/credits", headers={"x-auth-token": STUB_TOKEN})
-    T("status 200", resp.status_code == 200, f"status={resp.status_code}")
-    data = resp.json()
-    T("has balance field", "balance" in data, f"fields={list(data.keys())}")
-    T("has user_id field", "user_id" in data)
+    T("status 404", resp.status_code == 404, f"status={resp.status_code}")
 
 # ===========================================================================
-# D4-U9: POST /api/credits/use still returns valid response (backend preserved)
+# D4-U9: POST /api/credits/use returns 404 (removed)
 # ===========================================================================
-S("D4-U9: POST /api/credits/use still works")
+S("D4-U9: POST /api/credits/use removed")
 with TestClient(app) as client:
-    import api.main as main_module
-    original_balance = main_module._user_credits["balance"]
-    # Ensure there's balance to use
-    main_module._user_credits["balance"] = 10
     resp = client.post("/api/credits/use", headers={"x-auth-token": STUB_TOKEN})
-    T("status 200", resp.status_code == 200, f"status={resp.status_code}")
-    data = resp.json()
-    T("has balance field", "balance" in data)
-    T("balance decremented", data["balance"] == 9, f"balance={data['balance']}")
-    main_module._user_credits["balance"] = original_balance
+    T("status 404", resp.status_code == 404, f"status={resp.status_code}")
 
 # ===========================================================================
-# D4-U10: GET /api/subscription still returns valid response (backend preserved)
+# D4-U10: GET /api/subscription returns 404 (removed)
 # ===========================================================================
-S("D4-U10: GET /api/subscription still works")
+S("D4-U10: GET /api/subscription removed")
 with TestClient(app) as client:
     resp = client.get("/api/subscription", headers={"x-auth-token": STUB_TOKEN})
-    T("status 200", resp.status_code == 200, f"status={resp.status_code}")
-    data = resp.json()
-    T("has subscribed field", "subscribed" in data)
-    T("has user_id field", "user_id" in data)
+    T("status 404", resp.status_code == 404, f"status={resp.status_code}")
 
 # ===========================================================================
 # Summary

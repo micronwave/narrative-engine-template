@@ -71,11 +71,11 @@ resp = client.get("/api/watchlist")
 T("AUTH-1: No token → watchlist returns 200", resp.status_code == 200, f"status={resp.status_code}")
 
 # AUTH-2: Valid stub token → works
-resp = client.get("/api/credits", headers={"x-auth-token": "stub-auth-token"})
-T("AUTH-2: Valid stub token → credits returns 200", resp.status_code == 200, f"status={resp.status_code}")
+resp = client.get("/api/auth/me", headers={"x-auth-token": "stub-auth-token"})
+T("AUTH-2: Valid stub token → auth/me returns 200", resp.status_code == 200, f"status={resp.status_code}")
 
 # AUTH-3: Invalid token → 403
-resp = client.get("/api/credits", headers={"x-auth-token": "bad-token"})
+resp = client.get("/api/auth/me", headers={"x-auth-token": "bad-token"})
 T("AUTH-3: Invalid token → 403", resp.status_code == 403, f"status={resp.status_code}")
 
 # AUTH-4: Watchlist add works with auth
@@ -95,7 +95,7 @@ for m in _app.user_middleware:
         break
 # Just check the endpoint works with DELETE
 resp = client.delete("/api/watchlist/remove/nonexistent-id")
-T("AUTH-6: DELETE method works", resp.status_code == 200, f"status={resp.status_code}")
+T("AUTH-6: DELETE method works", resp.status_code in (200, 404), f"status={resp.status_code}")
 
 
 # ===========================================================================

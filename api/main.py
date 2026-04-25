@@ -27,6 +27,7 @@ from typing import Literal, Optional
 
 import functools
 import inspect
+import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from fastapi import Depends, FastAPI, File, HTTPException, Header, Path as FPath, Query, Request, UploadFile
@@ -124,6 +125,8 @@ _DISABLE_BACKGROUND_TASKS = (
     or Path(sys.argv[0]).stem.lower().startswith("test_")
 )
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Audit: shared-state lock, input validators, CSV sanitizer
 # ---------------------------------------------------------------------------
@@ -203,7 +206,6 @@ def _get_jwt_secret() -> str:
 # ---------------------------------------------------------------------------
 # D1 — Asset Class Association Model (in-memory stubs)
 # ---------------------------------------------------------------------------
-# Example stub data — replace with your own
 ASSET_CLASSES = [
     {"id": "ac-001", "name": "Semiconductors", "type": "sector",
      "description": "Companies involved in chip design, fabrication, and equipment"},
@@ -221,7 +223,6 @@ ASSET_CLASSES = [
      "description": "Heavy industry, manufacturing, aerospace, and defense contractors"},
 ]
 
-# Example stub data — replace with your own
 TRACKED_SECURITIES = [
     # Semiconductors (ac-001)
     {"id": "ts-001", "symbol": "TSM", "name": "Taiwan Semiconductor Manufacturing",
@@ -284,7 +285,6 @@ TRACKED_SECURITIES = [
 ]
 
 # NarrativeAssets: placeholder narrative IDs replaced at startup with real DB IDs.
-# Example stub data — replace with your own
 NARRATIVE_ASSETS = [
     {"id": "na-001", "narrative_id": "nar-001", "asset_class_id": "ac-001",
      "exposure_score": 0.92, "direction": "bullish",
@@ -346,7 +346,6 @@ def _build_narrative_assets(narrative_id: str) -> list:
 # ---------------------------------------------------------------------------
 # D4 — Manipulation/Coordination Detection Model (in-memory stubs)
 # ---------------------------------------------------------------------------
-# Example stub data — replace with your own
 MANIPULATION_INDICATORS = [
     {
         "id": "mi-001",
@@ -409,24 +408,6 @@ MANIPULATION_INDICATORS = [
         "status": "under_review",
     },
 ]
-
-# ---------------------------------------------------------------------------
-# In-memory credit store — resets on server restart (C4 will persist to DB).
-# ---------------------------------------------------------------------------
-_user_credits: dict = {
-    "user_id": "user-001",
-    "balance": 5,
-    "total_purchased": 20,
-    "total_used": 15,
-}
-
-# ---------------------------------------------------------------------------
-# In-memory subscription store (C4 — toggleable stub).
-# ---------------------------------------------------------------------------
-_subscription: dict = {
-    "user_id": "user-001",
-    "subscribed": False,
-}
 
 STUB_AUTH_TOKEN = "stub-auth-token"
 
@@ -2722,26 +2703,6 @@ def get_constellation(user: dict = Depends(get_optional_user)):
     return {"nodes": nodes, "edges": edges}
 
 
-@app.get("/api/credits")
-def get_credits(user: dict = Depends(get_current_user)):
-    """Returns credit balance for the signed-in user. Requires auth."""
-    return _user_credits
-
-
-class TopupRequest(BaseModel):
-    amount: int
-
-
-@app.post("/api/credits/topup")
-def topup_credits(body: TopupRequest, user: dict = Depends(get_current_user)):
-    """Increments credit balance. Requires auth."""
-    if body.amount <= 0:
-        raise HTTPException(status_code=422, detail="amount must be positive")
-    _user_credits["balance"] += body.amount
-    _user_credits["total_purchased"] += body.amount
-    return _user_credits
-
-
 # ===========================================================================
 # D1 Endpoints — Asset Class Association Model
 # ===========================================================================
@@ -2844,31 +2805,18 @@ def get_security_quote(request: Request, symbol: str = FPath(..., max_length=12)
 
 
 # ===========================================================================
-# C4 Endpoints — Subscription, Export, Signals
+# C4 Endpoints — Export, Signals
 # ===========================================================================
 
-@app.get("/api/subscription")
-def get_subscription(user: dict = Depends(get_current_user)):
-    """Returns subscription status for the signed-in user. Requires auth."""
-    return _subscription
-
-
-@app.post("/api/subscription/toggle")
-def toggle_subscription(user: dict = Depends(get_current_user)):
-    """Toggles subscription status. Requires auth. Returns updated status."""
-    _subscription["subscribed"] = not _subscription["subscribed"]
-    return _subscription
-
-
 @app.post("/api/narratives/{narrative_id}/export")
-def export_narrative(narrative_id: str = FPath(..., max_length=50), user: dict = Depends(get_current_user)):
+def export_narrative(
+    narrative_id: str = FPath(..., max_length=50),
+    user: dict = Depends(get_optional_user),
+):
     """
     Generates a CSV export of the narrative's signals, catalysts, and mutations.
-    Requires auth + active subscription (returns 403 otherwise).
+    Local-safe in stub mode; JWT mode still requires valid authentication.
     """
-    if not _subscription["subscribed"]:
-        raise HTTPException(status_code=403, detail="Subscription required for export")
-
     repo = get_repo()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -2963,17 +2911,6 @@ def get_signals(request: Request, user: dict = Depends(get_optional_user)):
     signals.sort(key=lambda s: s.get("timestamp") or "", reverse=True)
 
     return signals[:50]
-
-
-@app.post("/api/credits/use")
-def use_credit(user: dict = Depends(get_current_user)):
-    """Decrements credit balance by 1. Requires auth. Returns 402 if balance is 0."""
-    if _user_credits["balance"] <= 0:
-        raise HTTPException(status_code=402, detail="Insufficient credits")
-    _user_credits["balance"] -= 1
-    _user_credits["total_used"] += 1
-    return _user_credits
-
 
 def _ticker_payload() -> list:
     """Build current ticker data with a small random velocity nudge (±5%)."""
@@ -5637,7 +5574,7 @@ def analyze_narrative(request: Request, narrative_id: str = FPath(..., max_lengt
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sentiment/market")
-async def get_market_sentiment(user: dict = Depends(get_current_user)):
+async def get_market_sentiment(user: dict = Depends(get_optional_user)):
     """Market-wide sentiment gauge across all tracked securities."""
     tickers = [s["symbol"] for s in TRACKED_SECURITIES]
     if _sentiment_aggregator is None:
@@ -5660,7 +5597,7 @@ async def get_market_sentiment(user: dict = Depends(get_current_user)):
 async def get_sentiment_history(
     ticker: str = FPath(..., max_length=20, pattern=r"^[A-Z0-9.\-]{1,20}$"),
     hours: int = Query(default=168, ge=1, le=8760),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_optional_user),
 ):
     """Sentiment timeseries for a ticker (default 7 days)."""
     repo = get_repo()
@@ -5674,7 +5611,7 @@ async def get_sentiment_history(
 @app.get("/api/sentiment/{ticker}")
 async def get_ticker_sentiment(
     ticker: str = FPath(..., max_length=20, pattern=r"^[A-Z0-9.\-]{1,20}$"),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_optional_user),
 ):
     """Per-ticker composite sentiment with source breakdown."""
     repo = get_repo()
@@ -5715,7 +5652,7 @@ async def get_ticker_sentiment(
 async def get_trending_tickers(
     hours: int = Query(default=24, ge=1, le=168),
     limit: int = Query(default=10, ge=1, le=50),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_optional_user),
 ):
     """Top tickers by social mention volume in the last N hours."""
     repo = get_repo()
@@ -5729,7 +5666,7 @@ async def get_trending_tickers(
 @app.get("/api/social/{ticker}")
 async def get_social_detail(
     ticker: str = FPath(..., max_length=20, pattern=r"^[A-Z0-9.\-]{1,20}$"),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_optional_user),
 ):
     """Social sentiment detail for a ticker with source breakdown."""
     repo = get_repo()
@@ -5801,7 +5738,7 @@ _DEFAULT_DASHBOARD_LAYOUT = {
 
 
 @app.get("/api/dashboard/layout")
-async def get_dashboard_layout(user: dict = Depends(get_current_user)):
+async def get_dashboard_layout(user: dict = Depends(get_optional_user)):
     """Return saved dashboard layout or default for new user."""
     repo = get_repo()
     saved = repo.get_dashboard_layout(user["user_id"])
@@ -5811,7 +5748,7 @@ async def get_dashboard_layout(user: dict = Depends(get_current_user)):
 
 
 @app.put("/api/dashboard/layout")
-async def save_dashboard_layout(layout: dict, user: dict = Depends(get_current_user)):
+async def save_dashboard_layout(layout: dict, user: dict = Depends(get_optional_user)):
     """Save user's dashboard layout."""
     repo = get_repo()
     repo.save_dashboard_layout(user["user_id"], layout)

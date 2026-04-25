@@ -18,5 +18,7 @@ const Responsive = ({
     children
   );
 
-export { Responsive, WidthProvider };
-export default { Responsive, WidthProvider };
+const ResponsiveGridLayout = Responsive;
+
+export { Responsive, ResponsiveGridLayout, WidthProvider };
+export default { Responsive, ResponsiveGridLayout, WidthProvider };

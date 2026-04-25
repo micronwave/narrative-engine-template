@@ -26,11 +26,9 @@ import ConstellationMap from "../components/ConstellationMap";
 import MutationTimeline from "../components/MutationTimeline";
 import NarrativeCard from "../components/NarrativeCard";
 import { AuthContext } from "../contexts/AuthContext";
-import { SubscriptionContext } from "../contexts/SubscriptionContext";
 import type {
   ConstellationData,
   Mutation,
-  SubscriptionStatus,
 } from "../lib/api";
 
 // ---------------------------------------------------------------------------
@@ -103,31 +101,16 @@ const guestAuth = {
   signOut: jest.fn(),
 };
 
-function makeSubscription(subscribed = false, toggleFn = jest.fn().mockResolvedValue(undefined)) {
-  return {
-    subscribed,
-    status: { user_id: "user-001", subscribed } as SubscriptionStatus,
-    toggle: toggleFn,
-    refetch: jest.fn(),
-  };
-}
-
 function renderWith(
   ui: React.ReactElement,
   opts: {
     auth?: typeof signedInAuth | typeof guestAuth;
-    subscription?: ReturnType<typeof makeSubscription>;
   } = {}
 ) {
-  const {
-    auth = guestAuth,
-    subscription = makeSubscription(),
-  } = opts;
+  const { auth = guestAuth } = opts;
   return render(
     <AuthContext.Provider value={auth}>
-      <SubscriptionContext.Provider value={subscription}>
-        {ui}
-      </SubscriptionContext.Provider>
+      {ui}
     </AuthContext.Provider>
   );
 }
@@ -380,7 +363,7 @@ describe("C4-I2: Export button enabled for signed-in user", () => {
           Export Report
         </button>
       </div>,
-      { auth: signedInAuth, subscription: makeSubscription(true) }
+      { auth: signedInAuth }
     );
 
     const exportBtn = screen.getByTestId("export-btn");
@@ -393,14 +376,14 @@ describe("C4-I2: Export button enabled for signed-in user", () => {
 // ---------------------------------------------------------------------------
 
 describe("C4-E1: End-to-End analyst workflow", () => {
-  // ---- Guest flow: blurred card triggers CTA ----
-  it("guest: NarrativeCard blurred state renders neutral placeholder", () => {
+  // ---- Guest flow: fallback payload still renders a visible card ----
+  it("guest: NarrativeCard fallback payload renders visible card", () => {
     renderWith(
       <NarrativeCard narrative={{ id: "nar-002", blurred: true }} />,
       { auth: guestAuth }
     );
 
-    expect(screen.getByTestId("blurred-card")).toBeInTheDocument();
+    expect(screen.getByRole("article")).toBeInTheDocument();
     expect(screen.queryByText(/sign up to unlock/i)).not.toBeInTheDocument();
   });
 
@@ -422,7 +405,7 @@ describe("C4-E1: End-to-End analyst workflow", () => {
         </button>
         {/* No blurred cards */}
       </div>,
-      { auth: signedInAuth, subscription: makeSubscription(true) }
+      { auth: signedInAuth }
     );
 
     expect(screen.getByTestId("visible-card-1")).toBeInTheDocument();

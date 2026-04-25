@@ -6,7 +6,6 @@ import { ArrowLeft, Download, Sparkles, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { fetchNarrativeDetail, exportNarrative, fetchNarrativeAssets, fetchNarrativeManipulation, fetchNarrativeHistory, fetchNarrativeSources, fetchNarrativeCorrelations, analyzeNarrative } from "@/lib/api";
 import type { NarrativeDetail, NarrativeAsset, ManipulationIndicator, NarrativeSnapshot, SourceBreakdown, CorrelationResult, DeepAnalysis } from "@/lib/api";
-import { useAuth } from "@/contexts/AuthContext";
 import VelocitySparkline from "@/components/VelocitySparkline";
 import HistoryChart from "@/components/HistoryChart";
 import NarrativeChangelog from "@/components/NarrativeChangelog";
@@ -17,7 +16,6 @@ import MetricTooltip from "@/components/common/MetricTooltip";
 export default function NarrativeDetailPage() {
   const params = useParams();
   const id = params?.id as string;
-  const { token } = useAuth();
 
   const [narrative, setNarrative] = useState<NarrativeDetail | null>(null);
   const [assets, setAssets] = useState<NarrativeAsset[]>([]);
@@ -58,10 +56,10 @@ export default function NarrativeDetailPage() {
   }, [id]);
 
   async function handleExport() {
-    if (!token || !id) return;
+    if (!id) return;
     setExporting(true);
     try {
-      const blob = await exportNarrative(id, token);
+      const blob = await exportNarrative(id);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -170,18 +168,16 @@ export default function NarrativeDetailPage() {
               {analyzing ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
               {analyzing ? "Analyzing..." : "AI Analysis"}
             </button>
-            {token && (
-              <button
-                onClick={handleExport}
-                disabled={exporting}
-                className="flex items-center gap-1.5 bg-accent-primary hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed text-text-primary text-[13px] font-medium px-4 py-2 rounded-sm transition-all"
-                aria-label="Export narrative report as CSV"
-                data-testid="export-btn"
-              >
-                <Download size={13} />
-                {exporting ? "Exporting..." : "Export Report"}
-              </button>
-            )}
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="flex items-center gap-1.5 bg-accent-primary hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed text-text-primary text-[13px] font-medium px-4 py-2 rounded-sm transition-all"
+              aria-label="Export narrative report as CSV"
+              data-testid="export-btn"
+            >
+              <Download size={13} />
+              {exporting ? "Exporting..." : "Export Report"}
+            </button>
           </div>
         </div>
 

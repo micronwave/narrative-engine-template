@@ -17,6 +17,25 @@ type Props = {
   onInvestigateClick?: (id: string) => void;
 };
 
+function toVisibleNarrative(narrative: Narrative): VisibleNarrative {
+  if (!("blurred" in narrative) || narrative.blurred === false) {
+    return narrative as VisibleNarrative;
+  }
+  return {
+    id: narrative.id,
+    name: "Narrative",
+    descriptor: "Narrative data is loading.",
+    velocity_summary: "+0.0% signal velocity over 7d",
+    entropy: null,
+    saturation: 0,
+    velocity_timeseries: [],
+    signals: [],
+    catalysts: [],
+    mutations: [],
+    blurred: false,
+  };
+}
+
 /** Parse numeric velocity from summary string like "+13.6% signal velocity over 7d" */
 function parseVelocity(summary: string): number {
   const match = summary.match(/([+-]?\d+\.?\d*)/);
@@ -752,36 +771,6 @@ function DefaultCard({
 }
 
 /* ============================================================
-   BLURRED CARD (neutral placeholder)
-   ============================================================ */
-function BlurredCard() {
-  return (
-    <article
-      data-testid="blurred-card"
-      className="relative overflow-hidden h-44"
-      aria-label="Narrative unavailable"
-    >
-      <div
-        className="absolute inset-0 p-5"
-        style={{ background: "var(--bg-surface)", border: "1px solid var(--bg-border)" }}
-      >
-        <div className="h-4 rounded w-3/4 mb-2" style={{ background: "var(--bg-surface-hover)" }} />
-        <div className="h-3 rounded w-full mb-1" style={{ background: "var(--bg-border)" }} />
-        <div className="h-3 rounded w-5/6" style={{ background: "var(--bg-border)" }} />
-      </div>
-      <div
-        className="absolute inset-0 flex flex-col items-center justify-center gap-2"
-        style={{ background: "var(--bg-surface)", opacity: 0.85 }}
-      >
-        <span style={{ color: "var(--text-muted)", fontSize: "var(--text-small)", fontWeight: 500 }}>
-          Narrative unavailable
-        </span>
-      </div>
-    </article>
-  );
-}
-
-/* ============================================================
    EXPORTS — variant dispatch
    ============================================================ */
 export default function NarrativeCard({
@@ -790,11 +779,7 @@ export default function NarrativeCard({
   showSummary,
   onInvestigateClick,
 }: Props) {
-  if (narrative.blurred) {
-    return <BlurredCard />;
-  }
-
-  const vis = narrative as VisibleNarrative;
+  const vis = toVisibleNarrative(narrative);
 
   switch (variant) {
     case "hero":

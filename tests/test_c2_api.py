@@ -10,10 +10,12 @@ Run with:
     python -X utf8 test_c2_api.py
 
 Exit code 0 if all tests pass, 1 if any fail.
+On all-pass, appends a line to frontend_build_log.
 """
 
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 logging.basicConfig(
@@ -83,7 +85,7 @@ def _print_summary() -> None:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from api.main import app, _user_credits, STUB_AUTH_TOKEN  # noqa: E402
+from api.main import app, STUB_AUTH_TOKEN  # noqa: E402
 
 client = TestClient(app)
 AUTH_HEADER = {"x-auth-token": STUB_AUTH_TOKEN}
@@ -219,60 +221,45 @@ for i, edge in enumerate(edges[:2]):
     T(f"edge[{i}] has weight numeric", isinstance(edge.get("weight"), (int, float)))
 
 # ===========================================================================
-# C2-U4: GET /api/credits — auth gated
+# C2-U4: Monetization endpoints removed
 # ===========================================================================
-S("C2-U4: GET /api/credits")
+S("C2-U4: monetization endpoints removed")
 
-# Auth enforcement: no token → 403
-resp_guest = client.get("/api/credits")
-T("no token gets 403", resp_guest.status_code == 403, f"got {resp_guest.status_code}")
-
-# Signed-in → 200 + credit object
-resp_auth = client.get("/api/credits", headers=AUTH_HEADER)
-T("signed-in gets 200", resp_auth.status_code == 200, f"got {resp_auth.status_code}")
-
-credits = resp_auth.json()
-T("has balance int", isinstance(credits.get("balance"), int))
-T("has total_purchased int", isinstance(credits.get("total_purchased"), int))
-T("has total_used int", isinstance(credits.get("total_used"), int))
-T("has user_id str", isinstance(credits.get("user_id"), str))
+T("GET /api/credits returns 404", client.get("/api/credits").status_code == 404)
+T("POST /api/credits/topup returns 404", client.post("/api/credits/topup", json={"amount": 5}).status_code == 404)
+T("POST /api/credits/use returns 404", client.post("/api/credits/use").status_code == 404)
+T("GET /api/subscription returns 404", client.get("/api/subscription").status_code == 404)
+T("POST /api/subscription/toggle returns 404", client.post("/api/subscription/toggle").status_code == 404)
 
 # ===========================================================================
-# C2-U5: POST /api/credits/topup — increments balance
+# C2-U5: Export is local-safe and retained
 # ===========================================================================
-S("C2-U5: POST /api/credits/topup increments balance")
+S("C2-U5: export endpoint local-safe")
 
-# Auth enforcement: no token → 403
-resp_guest_topup = client.post("/api/credits/topup", json={"amount": 5})
-T("no token topup gets 403", resp_guest_topup.status_code == 403, f"got {resp_guest_topup.status_code}")
-
-# Get current balance
-before = _user_credits["balance"]
-resp_topup = client.post("/api/credits/topup", json={"amount": 5}, headers=AUTH_HEADER)
-T("topup returns 200", resp_topup.status_code == 200, f"got {resp_topup.status_code}")
-
-updated = resp_topup.json()
-T("balance increased by 5", updated.get("balance") == before + 5,
-  f"before={before} after={updated.get('balance')}")
-T("total_purchased increased by 5", updated.get("total_purchased") == _user_credits["total_purchased"])
-
-# Confirm via GET
-resp_check = client.get("/api/credits", headers=AUTH_HEADER)
-T("GET /api/credits reflects new balance", resp_check.json().get("balance") == before + 5)
+if real_id:
+    resp_export = client.post(f"/api/narratives/{real_id}/export")
+    T("export without token returns 200", resp_export.status_code == 200, f"got {resp_export.status_code}")
+    T("export returns csv", "text/csv" in (resp_export.headers.get("content-type") or ""))
+    resp_bad = client.post(
+        f"/api/narratives/{real_id}/export",
+        headers={"x-auth-token": "bad-token"},
+    )
+    T("export with bad token returns 403", resp_bad.status_code == 403, f"got {resp_bad.status_code}")
 
 # ===========================================================================
-# Auth check: no auth token → 403 on credit endpoints
-# ===========================================================================
-S("Auth: invalid token blocks credit endpoints (V3: no token = single-user OK)")
-
-T("GET /api/credits with bad token → 403",
-  client.get("/api/credits", headers={"x-auth-token": "bad-token"}).status_code == 403)
-T("POST /api/credits/topup with bad token → 403",
-  client.post("/api/credits/topup", json={"amount": 1}, headers={"x-auth-token": "bad-token"}).status_code == 403)
-
-# ===========================================================================
-# Summary
+# Summary + frontend_build_log
 # ===========================================================================
 _print_summary()
+
+if _fail == 0:
+    log_path = Path(__file__).parent.parent / "frontend_build_log"
+    line = (
+        f"C2 — Data model + narrative detail/constellation endpoints, "
+        f"monetization routes removed, export local-safe, "
+        f"retained UI API checks pass — {date.today().isoformat()}\n"
+    )
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(line)
+    print(f"\nfrontend_build_log updated.")
 
 sys.exit(0 if _fail == 0 else 1)

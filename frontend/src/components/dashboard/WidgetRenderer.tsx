@@ -3,7 +3,19 @@
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import type { WidgetType } from "./WidgetCatalog";
-import type { Narrative, VisibleNarrative } from "@/lib/api";
+import {
+  fetchAlerts,
+  fetchMarketSentiment,
+  fetchNarratives,
+  fetchPortfolioSummary,
+  fetchSectorConvergence,
+  fetchSignalLeaderboard,
+  fetchStocks,
+  fetchUpcomingEarnings,
+  fetchWatchlist,
+  type Narrative,
+  type VisibleNarrative,
+} from "@/lib/api";
 
 interface WidgetRendererProps {
   id: string;
@@ -12,6 +24,25 @@ interface WidgetRendererProps {
   isEditing: boolean;
   compact?: boolean;
   onRemove: (id: string) => void;
+}
+
+function asVisibleNarrative(narrative: Narrative): VisibleNarrative {
+  if (!("blurred" in narrative) || narrative.blurred === false) {
+    return narrative as VisibleNarrative;
+  }
+  return {
+    id: narrative.id,
+    name: "Narrative",
+    descriptor: "Narrative data is loading.",
+    velocity_summary: "+0.0% signal velocity over 7d",
+    entropy: null,
+    saturation: 0,
+    velocity_timeseries: [],
+    signals: [],
+    catalysts: [],
+    mutations: [],
+    blurred: false,
+  };
 }
 
 // Shared loading placeholder — keeps the original "loading…" text for each type
@@ -27,11 +58,11 @@ function LoadingState({ label }: { label: string }) {
 function NarrativeRadarWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<Narrative[]>({
     queryKey: ["narratives"],
-    queryFn: () => fetch("/api/narratives").then((r) => r.json()),
+    queryFn: fetchNarratives,
   });
   if (isLoading) return <LoadingState label="Narrative Radar" />;
   const narratives = (Array.isArray(data) ? data : [])
-    .filter((n): n is VisibleNarrative => !n.blurred)
+    .map(asVisibleNarrative)
     .slice(0, compact ? 3 : 5);
   return (
     <div data-testid="widget-body-narrative_radar" className="overflow-y-auto h-full p-2">
@@ -67,7 +98,7 @@ type LeaderboardResponse = SignalEntry[] | { signals: SignalEntry[] };
 function SignalLeaderboardWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<LeaderboardResponse>({
     queryKey: ["signal-leaderboard"],
-    queryFn: () => fetch("/api/signals/leaderboard").then((r) => r.json()),
+    queryFn: () => fetchSignalLeaderboard(),
   });
   if (isLoading) return <LoadingState label="Signal Leaderboard" />;
   const signals: SignalEntry[] = Array.isArray(data)
@@ -120,7 +151,7 @@ function TopMoversWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<StockItem[]>({
     queryKey: ["stocks-top-movers"],
     queryFn: () =>
-      fetch("/api/stocks?sort_by=change&sort_order=desc").then((r) => r.json()),
+      fetchStocks({ sort_by: "change", sort_order: "desc" }) as Promise<StockItem[]>,
   });
   if (isLoading) return <LoadingState label="Top Movers" />;
   const stocks = (Array.isArray(data) ? data : []).slice(0, compact ? 3 : 5);
@@ -166,7 +197,7 @@ type MarketSentiment = {
 function SentimentMeterWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<MarketSentiment>({
     queryKey: ["sentiment-market"],
-    queryFn: () => fetch("/api/sentiment/market").then((r) => r.json()),
+    queryFn: fetchMarketSentiment,
   });
   if (isLoading) return <LoadingState label="Sentiment Meter" />;
   const score = data?.market_score ?? 0;
@@ -232,7 +263,7 @@ type AlertItem = {
 function AlertFeedWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<AlertItem[]>({
     queryKey: ["alerts-feed"],
-    queryFn: () => fetch("/api/alerts").then((r) => r.json()),
+    queryFn: () => fetchAlerts() as Promise<AlertItem[]>,
   });
   if (isLoading) return <LoadingState label="Alert Feed" />;
   const alerts = (Array.isArray(data) ? data : [])
@@ -269,7 +300,7 @@ type WatchlistItem = {
 function WatchlistWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<{ items: WatchlistItem[]; watchlist_id: string | null }>({
     queryKey: ["watchlist"],
-    queryFn: () => fetch("/api/watchlist").then((r) => r.json()),
+    queryFn: () => fetchWatchlist() as Promise<{ items: WatchlistItem[]; watchlist_id: string | null }>,
   });
   if (isLoading) return <LoadingState label="Watchlist" />;
   const items = (data?.items ?? []).slice(0, compact ? 3 : 5);
@@ -302,7 +333,7 @@ function WatchlistWidget({ compact }: { compact?: boolean }) {
 function MarketHeatmapWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<StockItem[]>({
     queryKey: ["stocks-heatmap"],
-    queryFn: () => fetch("/api/stocks").then((r) => r.json()),
+    queryFn: () => fetchStocks() as Promise<StockItem[]>,
   });
   if (isLoading) return <LoadingState label="Market Heatmap" />;
   const stocks = (Array.isArray(data) ? data : []).slice(0, compact ? 9 : 15);
@@ -363,7 +394,7 @@ type PortfolioSummary = {
 function PortfolioSummaryWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<PortfolioSummary>({
     queryKey: ["portfolio-summary"],
-    queryFn: () => fetch("/api/portfolio/summary").then((r) => r.json()),
+    queryFn: fetchPortfolioSummary,
   });
   if (isLoading) return <LoadingState label="Portfolio Summary" />;
   const totalValue = data?.total_value ?? 0;
@@ -424,7 +455,7 @@ type ConvergenceSector = {
 function ConvergenceRadarWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<{ sectors?: ConvergenceSector[] }>({
     queryKey: ["convergence-sectors"],
-    queryFn: () => fetch("/api/analytics/sector-convergence").then((r) => r.json()),
+    queryFn: () => fetchSectorConvergence() as Promise<{ sectors?: ConvergenceSector[] }>,
   });
   if (isLoading) return <LoadingState label="Convergence Radar" />;
   const sectors = (data?.sectors ?? []).slice(0, compact ? 3 : 5);
@@ -463,7 +494,7 @@ type EarningsItem = {
 function EconomicCalendarWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<EarningsItem[]>({
     queryKey: ["earnings-upcoming"],
-    queryFn: () => fetch("/api/earnings/upcoming").then((r) => r.json()),
+    queryFn: () => fetchUpcomingEarnings() as Promise<EarningsItem[]>,
   });
   if (isLoading) return <LoadingState label="Economic Calendar" />;
   const items = (Array.isArray(data) ? data : []).slice(0, compact ? 3 : 5);

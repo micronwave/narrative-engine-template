@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { LayoutDashboard, Plus } from "lucide-react";
 import DashboardGrid, { type DashboardWidget, type GridLayout } from "@/components/dashboard/DashboardGrid";
 import WidgetCatalog, { type WidgetType, WIDGET_DEFINITIONS } from "@/components/dashboard/WidgetCatalog";
+import { fetchDashboardLayout, saveDashboardLayout } from "@/lib/api";
 
 const DEFAULT_WIDGETS: DashboardWidget[] = [
   { id: "narrative_radar", type: "narrative_radar", title: "Narrative Radar" },
@@ -32,8 +33,7 @@ export default function DashboardPage() {
 
   // Load saved layout on mount
   useEffect(() => {
-    fetch("/api/dashboard/layout")
-      .then((r) => r.json())
+    fetchDashboardLayout()
       .then((data) => {
         if (data?.widgets && Array.isArray(data.widgets)) {
           setWidgets(data.widgets);
@@ -49,11 +49,7 @@ export default function DashboardPage() {
     (updatedWidgets: DashboardWidget[], updatedGrid: GridLayout) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
-        fetch("/api/dashboard/layout", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ widgets: updatedWidgets, grid: updatedGrid }),
-        }).catch(() => {});
+        saveDashboardLayout({ widgets: updatedWidgets, grid: updatedGrid }).catch(() => {});
       }, 2000);
     },
     []

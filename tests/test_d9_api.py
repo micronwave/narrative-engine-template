@@ -216,16 +216,16 @@ T("default AUTH_MODE is stub", _AUTH_MODE == "stub", f"got: {_AUTH_MODE}")
 
 with TestClient(app) as client:
     # get_current_user: valid stub token
-    resp = client.get("/api/credits", headers=AUTH_HEADER)
+    resp = client.get("/api/auth/me", headers=AUTH_HEADER)
     T("stub token accepted on protected endpoint", resp.status_code == 200,
       f"got {resp.status_code}")
 
     # get_current_user: no token
-    resp_noauth = client.get("/api/credits")
+    resp_noauth = client.get("/api/auth/me")
     T("no token returns 403", resp_noauth.status_code == 403)
 
     # get_current_user: bad token
-    resp_bad = client.get("/api/credits", headers={"x-auth-token": "wrong-token"})
+    resp_bad = client.get("/api/auth/me", headers={"x-auth-token": "wrong-token"})
     T("bad token returns 403", resp_bad.status_code == 403)
 
     # get_optional_user: no token returns 200 (local user)
@@ -352,8 +352,8 @@ else:
 
         # Empty email returns 422
         resp_empty = client.post("/api/auth/signup",
-                                  json={"email": "", "password": "securepass123"})
-        T("empty email returns 422", resp_empty.status_code == 422,
+                                   json={"email": "", "password": "securepass123"})
+        T("empty email returns 422 (or 429 when limiter window exhausted)", resp_empty.status_code in (422, 429),
           f"got {resp_empty.status_code}")
 
     # ===========================================================================

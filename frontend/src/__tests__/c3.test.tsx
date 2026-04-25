@@ -3,8 +3,8 @@
  *
  * Unit:
  *   C3-U1: NarrativeCard visible — renders name, descriptor, velocity_summary; aria-label present
- *   C3-U2: NarrativeCard blurred — renders neutral placeholder with no paywall copy
- *   C3-U3: NarrativeCard — switches visible/blurred based on prop
+ *   C3-U2: NarrativeCard fallback payload renders visible card (no lock/paywall state)
+ *   C3-U3: NarrativeCard renders article for both full and fallback payloads
  *   C3-U4: VelocitySparkline — 7 points → SVG polyline; last>first = green stroke
  *   C3-U5: SaturationMeter — saturation 0.45 → ~45% width; saturation 0.8 → red color
  *   C3-U6: InvestigateDrawer — opens with narrativeId; renders name + evidence
@@ -157,11 +157,11 @@ describe("C3-U1: NarrativeCard visible fields", () => {
 });
 
 // ---------------------------------------------------------------------------
-// C3-U2: NarrativeCard blurred renders neutral placeholder
+// C3-U2: NarrativeCard fallback payload renders visible card
 // ---------------------------------------------------------------------------
 
-describe("C3-U2: NarrativeCard blurred overlay", () => {
-  it("renders a neutral placeholder without paywall copy", () => {
+describe("C3-U2: NarrativeCard fallback payload", () => {
+  it("renders as visible card without paywall copy", () => {
     renderWithContexts(
       <NarrativeCard
         narrative={{ id: "nar-002", blurred: true }}
@@ -169,7 +169,7 @@ describe("C3-U2: NarrativeCard blurred overlay", () => {
       guestAuth
     );
 
-    expect(screen.getByTestId("blurred-card")).toBeInTheDocument();
+    expect(screen.getByRole("article")).toBeInTheDocument();
     expect(
       screen.queryByText(/sign up to unlock/i)
     ).not.toBeInTheDocument();
@@ -180,22 +180,22 @@ describe("C3-U2: NarrativeCard blurred overlay", () => {
 });
 
 // ---------------------------------------------------------------------------
-// C3-U3: NarrativeCard switches between visible and blurred
+// C3-U3: NarrativeCard renders article for visible and fallback payloads
 // ---------------------------------------------------------------------------
 
-describe("C3-U3: NarrativeCard visible/blurred switch", () => {
+describe("C3-U3: NarrativeCard visible/fallback switch", () => {
   it("renders visible card when blurred=false", () => {
     renderWithContexts(<NarrativeCard narrative={MOCK_VISIBLE} />, guestAuth);
     expect(screen.getByRole("article")).toBeInTheDocument();
     expect(screen.queryByText(/sign up to unlock/i)).not.toBeInTheDocument();
   });
 
-  it("renders blurred card when blurred=true", () => {
+  it("renders visible fallback card when blurred=true", () => {
     renderWithContexts(
       <NarrativeCard narrative={{ id: "nar-002", blurred: true }} />,
       guestAuth
     );
-    expect(screen.getByTestId("blurred-card")).toBeInTheDocument();
+    expect(screen.getByRole("article")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /unlock/i })).not.toBeInTheDocument();
   });
 });

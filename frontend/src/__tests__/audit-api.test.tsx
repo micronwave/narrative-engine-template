@@ -34,13 +34,6 @@
  *   A-ERR-4: fetchUpcomingEarnings returns [] on failure (documented fallback)
  *   A-ERR-5: All standard fetch functions throw on non-ok response
  *
- * Validation:
- *   A-VAL-1: topupCredits rejects negative amount
- *   A-VAL-2: topupCredits rejects NaN
- *   A-VAL-3: topupCredits rejects Infinity
- *   A-VAL-4: topupCredits rejects zero
- *   A-VAL-5: topupCredits accepts valid positive amount
- *
  * Colors:
  *   A-CLR-1: COLORS constants match expected hex values
  *   A-CLR-2: COLORS includes purple and muted
@@ -121,16 +114,11 @@ import {
   fetchNarrativeAssets,
   fetchAlertCount,
   fetchUpcomingEarnings,
-  topupCredits,
   fetchStocks,
   fetchManipulation,
   fetchNarratives,
   fetchTicker,
   fetchConstellation,
-  fetchCredits,
-  useCredit,
-  fetchSubscription,
-  toggleSubscription,
   fetchSignals,
   fetchAssetClasses,
   fetchSecurities,
@@ -363,26 +351,6 @@ describe("Error handling", () => {
     await expect(fetchConstellation()).rejects.toThrow("constellation fetch failed: 500");
   });
 
-  test("A-ERR-5d: fetchCredits throws on 401", async () => {
-    mockFail(401);
-    await expect(fetchCredits("token")).rejects.toThrow("credits fetch failed: 401");
-  });
-
-  test("A-ERR-5e: useCredit throws on 402", async () => {
-    mockFail(402);
-    await expect(useCredit("token")).rejects.toThrow("use credit failed: 402");
-  });
-
-  test("A-ERR-5f: fetchSubscription throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchSubscription("token")).rejects.toThrow("subscription fetch failed: 500");
-  });
-
-  test("A-ERR-5g: toggleSubscription throws on 500", async () => {
-    mockFail(500);
-    await expect(toggleSubscription("token")).rejects.toThrow("subscription toggle failed: 500");
-  });
-
   test("A-ERR-5h: fetchSignals throws on 500", async () => {
     mockFail(500);
     await expect(fetchSignals()).rejects.toThrow("signals fetch failed: 500");
@@ -495,47 +463,6 @@ describe("Error handling", () => {
   test("A-ERR-5cc: fetchContrarianSignals throws on 500", async () => {
     mockFail(500);
     await expect(fetchContrarianSignals()).rejects.toThrow("contrarian-signals failed: 500");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Validation Tests
-// ---------------------------------------------------------------------------
-
-describe("Input validation", () => {
-  test("A-VAL-1: topupCredits rejects negative amount", async () => {
-    await expect(topupCredits("token", -50)).rejects.toThrow(
-      "topup amount must be a positive finite number"
-    );
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  test("A-VAL-2: topupCredits rejects NaN", async () => {
-    await expect(topupCredits("token", NaN)).rejects.toThrow(
-      "topup amount must be a positive finite number"
-    );
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  test("A-VAL-3: topupCredits rejects Infinity", async () => {
-    await expect(topupCredits("token", Infinity)).rejects.toThrow(
-      "topup amount must be a positive finite number"
-    );
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  test("A-VAL-4: topupCredits rejects zero", async () => {
-    await expect(topupCredits("token", 0)).rejects.toThrow(
-      "topup amount must be a positive finite number"
-    );
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  test("A-VAL-5: topupCredits accepts valid positive amount", async () => {
-    mockOk({ user_id: "u1", balance: 10, total_purchased: 10, total_used: 0 });
-    const result = await topupCredits("token", 10);
-    expect(result.balance).toBe(10);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -700,12 +627,11 @@ describe("Auth headers", () => {
     expect((opts.headers as Record<string, string>)["x-auth-token"]).toBe("test-tok");
   });
 
-  test("topupCredits sends both Content-Type and x-auth-token", async () => {
-    mockOk({ user_id: "u1", balance: 10, total_purchased: 10, total_used: 0 });
-    await topupCredits("tk", 5);
+  test("exportNarrative omits x-auth-token when token is not provided", async () => {
+    mockOk();
+    await exportNarrative("nar-001");
     const opts = mockFetch.mock.calls[0][1] as RequestInit;
-    const headers = opts.headers as Record<string, string>;
-    expect(headers["Content-Type"]).toBe("application/json");
-    expect(headers["x-auth-token"]).toBe("tk");
+    const headers = (opts.headers as Record<string, string>) || {};
+    expect(headers["x-auth-token"]).toBeUndefined();
   });
 });

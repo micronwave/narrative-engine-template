@@ -309,72 +309,38 @@ export async function fetchConstellation(): Promise<ConstellationData> {
   return res.json();
 }
 
-export async function fetchCredits(token: string): Promise<InvestigationCredit> {
-  const res = await fetch("/api/credits", {
-    headers: authHeaders({ "x-auth-token": token }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`credits fetch failed: ${res.status}`);
+export type DashboardLayoutWidget = {
+  id: string;
+  type: string;
+  title: string;
+};
+
+export type DashboardLayout = {
+  widgets: DashboardLayoutWidget[];
+  grid: Record<string, Array<{ i: string; x: number; y: number; w: number; h: number }>>;
+};
+
+export async function fetchDashboardLayout(): Promise<DashboardLayout> {
+  const res = await fetch("/api/dashboard/layout", { headers: authHeaders(), credentials: "include" });
+  if (!res.ok) throw new Error(`dashboard layout fetch failed: ${res.status}`);
   return res.json();
 }
 
-export async function topupCredits(
-  token: string,
-  amount: number
-): Promise<InvestigationCredit> {
-  if (!Number.isFinite(amount) || amount <= 0)
-    throw new Error("topup amount must be a positive finite number");
-  const res = await fetch("/api/credits/topup", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json", "x-auth-token": token }),
-    body: JSON.stringify({ amount }),
+export async function saveDashboardLayout(layout: DashboardLayout): Promise<{ status: string }> {
+  const res = await fetch("/api/dashboard/layout", {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(layout),
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`topup failed: ${res.status}`);
+  if (!res.ok) throw new Error(`dashboard layout save failed: ${res.status}`);
   return res.json();
 }
 
-/**
- * POST /api/credits/use — consumes 1 credit.
- * Throws on 402 (insufficient credits) or other non-ok responses.
- */
-export async function useCredit(token: string): Promise<InvestigationCredit> {
-  const res = await fetch("/api/credits/use", {
-    method: "POST",
-    headers: authHeaders({ "x-auth-token": token }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`use credit failed: ${res.status}`);
-  return res.json();
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2 removal targets — keep for now while backend auth/monetization stays
-// ---------------------------------------------------------------------------
-
-export async function fetchSubscription(token: string): Promise<SubscriptionStatus> {
-  const res = await fetch("/api/subscription", {
-    headers: authHeaders({ "x-auth-token": token }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`subscription fetch failed: ${res.status}`);
-  return res.json();
-}
-
-export async function toggleSubscription(token: string): Promise<SubscriptionStatus> {
-  const res = await fetch("/api/subscription/toggle", {
-    method: "POST",
-    headers: authHeaders({ "x-auth-token": token }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error(`subscription toggle failed: ${res.status}`);
-  return res.json();
-}
-
-export async function exportNarrative(id: string, token: string): Promise<Blob> {
+export async function exportNarrative(id: string, token?: string | null): Promise<Blob> {
   const res = await fetch(`/api/narratives/${encodeURIComponent(id)}/export`, {
     method: "POST",
-    headers: authHeaders({ "x-auth-token": token }),
+    headers: token ? authHeaders({ "x-auth-token": token }) : authHeaders(),
     credentials: "include",
   });
   if (!res.ok) throw new Error(`export failed: ${res.status}`);

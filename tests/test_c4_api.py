@@ -9,6 +9,7 @@ Run with:
     python -X utf8 test_c4_api.py
 
 Exit code 0 if all tests pass, 1 if any fail.
+On all-pass, appends a line to frontend_build_log.
 """
 
 import logging
@@ -82,57 +83,30 @@ def _print_summary() -> None:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from api.main import app, _subscription, _user_credits, STUB_AUTH_TOKEN  # noqa: E402
+from api.main import app, STUB_AUTH_TOKEN  # noqa: E402
 
 client = TestClient(app)
 AUTH_HEADER = {"x-auth-token": STUB_AUTH_TOKEN}
 
-# Reset subscription to known state before tests
-_subscription["subscribed"] = False
-_user_credits["balance"] = 5
+# ===========================================================================
+# C4-U1: Monetization endpoints removed
+# ===========================================================================
+S("C4-U1: monetization endpoints removed")
+
+T("GET /api/subscription returns 404", client.get("/api/subscription", headers=AUTH_HEADER).status_code == 404)
+T("POST /api/subscription/toggle returns 404", client.post("/api/subscription/toggle", headers=AUTH_HEADER).status_code == 404)
+T("GET /api/credits returns 404", client.get("/api/credits", headers=AUTH_HEADER).status_code == 404)
+T("POST /api/credits/use returns 404", client.post("/api/credits/use", headers=AUTH_HEADER).status_code == 404)
 
 # ===========================================================================
-# C4-U1: GET /api/subscription — returns status, requires auth
+# C4-U2: Export endpoint retained and local-safe
 # ===========================================================================
-S("C4-U1: GET /api/subscription")
-
-resp = client.get("/api/subscription", headers=AUTH_HEADER)
-T("status 200", resp.status_code == 200, f"got {resp.status_code}")
-
-body = resp.json()
-T("has user_id", isinstance(body.get("user_id"), str))
-T("has subscribed bool", isinstance(body.get("subscribed"), bool))
-T("initial subscribed=False", body.get("subscribed") is False)
-
-# Guest gets 403
-resp_guest = client.get("/api/subscription")
-T("guest gets 403", resp_guest.status_code == 403, f"got {resp_guest.status_code}")
+S("C4-U2: POST /api/narratives/{id}/export local-safe")
 
 # ===========================================================================
-# C4-U2: POST /api/subscription/toggle — toggles and returns status
+# C4-U3: POST /api/narratives/{id}/export returns CSV
 # ===========================================================================
-S("C4-U2: POST /api/subscription/toggle")
-
-# Toggle → subscribed=True
-resp = client.post("/api/subscription/toggle", headers=AUTH_HEADER)
-T("status 200", resp.status_code == 200, f"got {resp.status_code}")
-T("now subscribed", resp.json().get("subscribed") is True, str(resp.json()))
-
-# Toggle again → subscribed=False
-resp2 = client.post("/api/subscription/toggle", headers=AUTH_HEADER)
-T("toggled back to False", resp2.json().get("subscribed") is False)
-
-# Guest gets 403
-resp_guest = client.post("/api/subscription/toggle")
-T("guest gets 403", resp_guest.status_code == 403, f"got {resp_guest.status_code}")
-
-# ===========================================================================
-# C4-U3: POST /api/narratives/{id}/export — subscriber gets CSV
-# ===========================================================================
-S("C4-U3: POST /api/narratives/{id}/export subscriber flow")
-
-# Subscribe first
-_subscription["subscribed"] = True
+S("C4-U3: POST /api/narratives/{id}/export CSV response")
 
 # Get a real narrative ID
 narr_resp = client.get("/api/narratives")
@@ -141,7 +115,7 @@ real_id = visible[0]["id"] if visible else None
 T("have a real narrative id", real_id is not None)
 
 if real_id:
-    resp = client.post(f"/api/narratives/{real_id}/export", headers=AUTH_HEADER)
+    resp = client.post(f"/api/narratives/{real_id}/export")
     T("status 200", resp.status_code == 200, f"got {resp.status_code}")
     ct = resp.headers.get("content-type", "")
     T("content-type is text/csv", "text/csv" in ct, f"got '{ct}'")
@@ -154,28 +128,19 @@ if real_id:
 
 # 404 for non-existent narrative
 resp_404 = client.post("/api/narratives/nonexistent-id-xyz/export", headers=AUTH_HEADER)
-T("non-existent narrative \u2192 404", resp_404.status_code == 404, f"got {resp_404.status_code}")
+T("non-existent narrative → 404", resp_404.status_code == 404, f"got {resp_404.status_code}")
 
 # ===========================================================================
-# C4-U4: POST /api/narratives/{id}/export — non-subscriber gets 403
+# C4-U4: POST /api/narratives/{id}/export invalid token rejected
 # ===========================================================================
-S("C4-U4: POST /api/narratives/{id}/export non-subscriber")
-
-_subscription["subscribed"] = False
+S("C4-U4: POST /api/narratives/{id}/export invalid token")
 
 if real_id:
-    resp = client.post(f"/api/narratives/{real_id}/export", headers=AUTH_HEADER)
-    T("non-subscriber gets 403", resp.status_code == 403, f"got {resp.status_code}")
-    T("detail mentions subscription", "subscription" in resp.json().get("detail", "").lower(),
-      resp.json().get("detail"))
-
-# Guest gets 403 too
-if real_id:
-    resp_guest = client.post(f"/api/narratives/{real_id}/export")
-    T("guest gets 403", resp_guest.status_code == 403, f"got {resp_guest.status_code}")
-
-# Re-subscribe for remaining tests
-_subscription["subscribed"] = True
+    resp_bad = client.post(
+        f"/api/narratives/{real_id}/export",
+        headers={"x-auth-token": "wrong-token"},
+    )
+    T("bad token gets 403", resp_bad.status_code == 403, f"got {resp_bad.status_code}")
 
 # ===========================================================================
 # C4-U5: GET /api/signals — returns signal list with coordination flags
@@ -233,11 +198,11 @@ T("no blurred items", not any(n.get("blurred") for n in sub_data))
 # ===========================================================================
 # C4-U8: Regression — previous C2/C3 endpoints still work
 # ===========================================================================
-S("C4-U8: Regression \u2014 C2/C3 endpoints still functional")
+S("C4-U8: Regression — C2/C3 endpoints still functional")
 
 T("GET /api/health ok", client.get("/api/health").json() == {"status": "ok"})
-T("GET /api/credits ok", client.get("/api/credits", headers=AUTH_HEADER).status_code == 200)
-T("POST /api/credits/use ok", client.post("/api/credits/use", headers=AUTH_HEADER).status_code in (200, 402))
+T("GET /api/credits removed", client.get("/api/credits", headers=AUTH_HEADER).status_code == 404)
+T("POST /api/credits/use removed", client.post("/api/credits/use", headers=AUTH_HEADER).status_code == 404)
 T("GET /api/constellation ok", client.get("/api/constellation").status_code == 200)
 
 # ===========================================================================
@@ -245,4 +210,15 @@ T("GET /api/constellation ok", client.get("/api/constellation").status_code == 2
 # ===========================================================================
 _print_summary()
 
-sys.exit(0 if _fail == 0 else 1)
+passed = _fail == 0
+
+if passed:
+    log_path = Path(__file__).parent.parent / "frontend_build_log"
+    try:
+        from datetime import date as _date
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{_date.today()}] C4 backend tests: {_pass}/{_pass + _fail} passed\n")
+    except Exception:
+        pass
+
+sys.exit(0 if passed else 1)

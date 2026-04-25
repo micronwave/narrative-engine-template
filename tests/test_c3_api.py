@@ -9,6 +9,7 @@ Run with:
     python -X utf8 test_c3_api.py
 
 Exit code 0 if all tests pass, 1 if any fail.
+On all-pass, appends a line to frontend_build_log.
 """
 
 import logging
@@ -82,63 +83,46 @@ def _print_summary() -> None:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from api.main import app, _user_credits, STUB_AUTH_TOKEN  # noqa: E402
+from api.main import app, STUB_AUTH_TOKEN  # noqa: E402
 
 client = TestClient(app)
 AUTH_HEADER = {"x-auth-token": STUB_AUTH_TOKEN}
 
 # ===========================================================================
-# C3-U1: POST /api/credits/use — decrements balance
+# C3-U1: Monetization endpoints removed
 # ===========================================================================
-S("C3-U1: POST /api/credits/use decrements balance")
+S("C3-U1: monetization endpoints removed")
 
-# Reset to known state before test
-_user_credits["balance"] = 5
-_user_credits["total_used"] = 15
-
-resp = client.post("/api/credits/use", headers=AUTH_HEADER)
-T("status 200", resp.status_code == 200, f"got {resp.status_code}")
-
-body = resp.json()
-T("balance decremented", body.get("balance") == 4, f"got {body.get('balance')}")
-T("total_used incremented", body.get("total_used") == 16, f"got {body.get('total_used')}")
-T("user_id present", isinstance(body.get("user_id"), str))
-T("total_purchased unchanged", body.get("total_purchased") == _user_credits["total_purchased"])
-
-# Multiple decrements accumulate
-_user_credits["balance"] = 3
-resp2 = client.post("/api/credits/use", headers=AUTH_HEADER)
-T("second decrement status 200", resp2.status_code == 200, f"got {resp2.status_code}")
-T("balance now 2", resp2.json().get("balance") == 2, f"got {resp2.json().get('balance')}")
+T("POST /api/credits/use returns 404", client.post("/api/credits/use", headers=AUTH_HEADER).status_code == 404)
+T("GET /api/credits returns 404", client.get("/api/credits", headers=AUTH_HEADER).status_code == 404)
+T("GET /api/subscription returns 404", client.get("/api/subscription", headers=AUTH_HEADER).status_code == 404)
 
 # ===========================================================================
-# C3-U2: POST /api/credits/use — V3: no token = single-user OK, bad token = 403
+# C3-U2: Retained social/sentiment endpoints are local-safe
 # ===========================================================================
-S("C3-U2: POST /api/credits/use auth behavior")
+S("C3-U2: social/sentiment local-safe auth behavior")
 
-resp = client.post("/api/credits/use")
-T("no token → 403 (auth required)", resp.status_code == 403, f"got {resp.status_code}")
+resp_market = client.get("/api/sentiment/market")
+T("market sentiment without token → 200", resp_market.status_code == 200, f"got {resp_market.status_code}")
 
-resp_wrong = client.post("/api/credits/use", headers={"x-auth-token": "wrong-token"})
-T("wrong token → 403", resp_wrong.status_code == 403, f"got {resp_wrong.status_code}")
+resp_trending = client.get("/api/social/trending")
+T("social trending without token → 200", resp_trending.status_code == 200, f"got {resp_trending.status_code}")
+
+resp_wrong = client.get("/api/sentiment/market", headers={"x-auth-token": "wrong-token"})
+T("bad token on optional auth endpoint → 403", resp_wrong.status_code == 403, f"got {resp_wrong.status_code}")
 
 # ===========================================================================
-# C3-U3: POST /api/credits/use — 402 when balance is 0
+# C3-U3: Export endpoint is local-safe
 # ===========================================================================
-S("C3-U3: POST /api/credits/use returns 402 when balance is 0")
+S("C3-U3: export endpoint local-safe")
 
-_user_credits["balance"] = 0
-
-resp = client.post("/api/credits/use", headers=AUTH_HEADER)
-T("status 402", resp.status_code == 402, f"got {resp.status_code}")
-T("detail mentions credits", "credit" in resp.json().get("detail", "").lower(),
-  resp.json().get("detail"))
-
-# Balance stays at 0 after 402
-T("balance stays 0", _user_credits["balance"] == 0, f"got {_user_credits['balance']}")
-
-# Reset for subsequent tests
-_user_credits["balance"] = 5
+narratives = client.get("/api/narratives").json()
+real_id = narratives[0]["id"] if isinstance(narratives, list) and narratives else None
+T("real narrative id exists", real_id is not None)
+if real_id:
+    resp_export = client.post(f"/api/narratives/{real_id}/export")
+    T("export without token → 200", resp_export.status_code == 200, f"got {resp_export.status_code}")
+    T("export content-type is csv", "text/csv" in (resp_export.headers.get("content-type") or ""))
 
 # ===========================================================================
 # C3-U4: GET /api/stream — SSE content-type
@@ -164,4 +148,15 @@ T("/api/stream has GET", "get" in _paths.get("/api/stream", {}),
 # ===========================================================================
 _print_summary()
 
-sys.exit(0 if _fail == 0 else 1)
+passed = _fail == 0
+
+if passed:
+    log_path = Path(__file__).parent.parent / "frontend_build_log"
+    try:
+        from datetime import date as _date
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{_date.today()}] C3 backend tests: {_pass}/{_pass + _fail} passed\n")
+    except Exception:
+        pass
+
+sys.exit(0 if passed else 1)

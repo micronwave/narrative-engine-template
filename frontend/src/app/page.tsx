@@ -9,6 +9,25 @@ import MetricTooltip from "@/components/common/MetricTooltip";
 import { fetchNarratives, type VisibleNarrative } from "@/lib/api";
 import type { Narrative } from "@/lib/api";
 
+function asVisibleNarrative(narrative: Narrative): VisibleNarrative {
+  if (!("blurred" in narrative) || narrative.blurred === false) {
+    return narrative as VisibleNarrative;
+  }
+  return {
+    id: narrative.id,
+    name: "Narrative",
+    descriptor: "Narrative data is loading.",
+    velocity_summary: "+0.0% signal velocity over 7d",
+    entropy: null,
+    saturation: 0,
+    velocity_timeseries: [],
+    signals: [],
+    catalysts: [],
+    mutations: [],
+    blurred: false,
+  };
+}
+
 /** Relative time for live sync display */
 function syncLabel(narratives: VisibleNarrative[]): string {
   const latest = narratives
@@ -61,8 +80,8 @@ export default function GatewayPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const visibleNarratives = narratives
-    .filter((n): n is VisibleNarrative => !n.blurred)
+  const allVisible = narratives.map(asVisibleNarrative);
+  const visibleNarratives = allVisible
     .filter((n) =>
       topicFilter === "all" ? true : (n.topic_tags || []).includes(topicFilter)
     )
@@ -73,7 +92,6 @@ export default function GatewayPage() {
     });
 
   // Computed metrics
-  const allVisible = narratives.filter((n): n is VisibleNarrative => !n.blurred);
   const surgeCount = allVisible.filter((n) => n.burst_velocity?.is_burst).length;
   const avgDiversity = allVisible.length > 0
     ? allVisible.reduce((sum, n) => sum + (n.entropy || 0), 0) / allVisible.length
