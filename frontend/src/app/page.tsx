@@ -1,15 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { LogIn, LogOut, ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import NarrativeCard from "@/components/NarrativeCard";
 import InvestigateDrawer from "@/components/InvestigateDrawer";
 import SegmentedControl from "@/components/common/SegmentedControl";
 import MetricTooltip from "@/components/common/MetricTooltip";
-import { fetchNarratives, fetchTicker, type VisibleNarrative } from "@/lib/api";
-import { useAuth } from "@/contexts/AuthContext";
-import { useRealtimeData } from "@/hooks/useRealtimeData";
-import type { Narrative, TickerItem } from "@/lib/api";
+import { fetchNarratives, type VisibleNarrative } from "@/lib/api";
+import type { Narrative } from "@/lib/api";
 
 /** Relative time for live sync display */
 function syncLabel(narratives: VisibleNarrative[]): string {
@@ -27,9 +25,7 @@ function syncLabel(narratives: VisibleNarrative[]): string {
 }
 
 export default function GatewayPage() {
-  const { isSignedIn, signIn, signOut } = useAuth();
   const [narratives, setNarratives] = useState<Narrative[]>([]);
-  const [tickerItems, setTickerItems] = useState<TickerItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [drawerNarrativeId, setDrawerNarrativeId] = useState<string | null>(null);
@@ -46,13 +42,9 @@ export default function GatewayPage() {
       try {
         setLoading(true);
         setError(null);
-        const [narData, tickData] = await Promise.all([
-          fetchNarratives(),
-          fetchTicker(),
-        ]);
+        const narData = await fetchNarratives();
         if (cancelled) return;
         setNarratives(narData);
-        setTickerItems(tickData);
         setLoading(false);
       } catch (err) {
         if (cancelled) return;
@@ -69,10 +61,6 @@ export default function GatewayPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const { data: realtimeTickerData } = useRealtimeData<TickerItem[]>({ endpoint: "/api/ticker", interval: 10000 });
-  const currentTickerItems = realtimeTickerData ?? tickerItems;
-
-  // All narratives are visible (monetization removed in D4)
   const visibleNarratives = narratives
     .filter((n): n is VisibleNarrative => !n.blurred)
     .filter((n) =>
@@ -155,25 +143,6 @@ export default function GatewayPage() {
             )}
           </div>
 
-          <div className="flex items-center gap-3">
-            {isSignedIn ? (
-              <button
-                onClick={signOut}
-                className="flex items-center gap-1.5 text-text-muted hover:text-text-primary transition-all text-[10px]"
-                aria-label="Sign out"
-              >
-                <LogOut size={12} /> Sign out
-              </button>
-            ) : (
-              <button
-                onClick={signIn}
-                className="flex items-center gap-1.5 text-text-primary bg-accent-primary px-2.5 py-1 rounded-sm text-[10px] transition-all"
-                aria-label="Sign in"
-              >
-                <LogIn size={12} /> Sign in
-              </button>
-            )}
-          </div>
         </div>
 
         {/* Title rule */}

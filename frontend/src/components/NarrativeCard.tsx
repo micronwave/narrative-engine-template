@@ -1,9 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Lock, Search, ArrowUp, ArrowDown, Minus, Telescope, Radar, Star } from "lucide-react";
+import { Search, ArrowUp, ArrowDown, Minus, Telescope, Radar, Star } from "lucide-react";
 import type { Narrative, VisibleNarrative } from "@/lib/api";
-import { useAuth } from "@/contexts/AuthContext";
 import { useWatchlist } from "@/contexts/WatchlistContext";
 import VelocitySparkline from "./VelocitySparkline";
 import MomentumBar from "./MomentumBar";
@@ -15,7 +14,6 @@ type Props = {
   variant?: "hero" | "secondary" | "compact";
   /** For secondary variant: show one-line summary */
   showSummary?: boolean;
-  onUnlockClick?: () => void;
   onInvestigateClick?: (id: string) => void;
 };
 
@@ -152,23 +150,18 @@ function MiniTrendBars({ timeseries, color }: { timeseries: { date: string; valu
 function HeroCard({
   narrative,
   onInvestigateClick,
-  onUnlockClick,
 }: {
   narrative: VisibleNarrative;
-  onUnlockClick?: () => void;
   onInvestigateClick?: (id: string) => void;
 }) {
-  const { isSignedIn } = useAuth();
   const { isWatched, toggleWatch } = useWatchlist();
   const watched = isWatched(narrative.id);
   const [expanded, setExpanded] = useState(false);
-  const vel = parseVelocity(narrative.velocity_summary);
   const velColor = velSemanticColor(narrative.velocity_summary);
   const { text: ctaLabel, icon: CtaIcon } = ctaText(narrative);
   const accel = isAccelerating(narrative.velocity_summary);
 
   function handleInvestigate() {
-    if (!isSignedIn) { onUnlockClick?.(); return; }
     onInvestigateClick?.(narrative.id);
   }
 
@@ -376,14 +369,11 @@ function SecondaryCard({
   narrative,
   showSummary = false,
   onInvestigateClick,
-  onUnlockClick,
 }: {
   narrative: VisibleNarrative;
   showSummary?: boolean;
-  onUnlockClick?: () => void;
   onInvestigateClick?: (id: string) => void;
 }) {
-  const { isSignedIn } = useAuth();
   const { isWatched, toggleWatch } = useWatchlist();
   const watched = isWatched(narrative.id);
   const vel = parseVelocity(narrative.velocity_summary);
@@ -391,7 +381,6 @@ function SecondaryCard({
   const [hoverCta, setHoverCta] = useState(false);
 
   function handleInvestigate() {
-    if (!isSignedIn) { onUnlockClick?.(); return; }
     onInvestigateClick?.(narrative.id);
   }
 
@@ -512,18 +501,14 @@ function SecondaryCard({
 function CompactRow({
   narrative,
   onInvestigateClick,
-  onUnlockClick,
 }: {
   narrative: VisibleNarrative;
-  onUnlockClick?: () => void;
   onInvestigateClick?: (id: string) => void;
 }) {
-  const { isSignedIn } = useAuth();
   const [hovered, setHovered] = useState(false);
   const velColor = velSemanticColor(narrative.velocity_summary);
 
   function handleInvestigate() {
-    if (!isSignedIn) { onUnlockClick?.(); return; }
     onInvestigateClick?.(narrative.id);
   }
 
@@ -638,17 +623,12 @@ function CompactRow({
    ============================================================ */
 function DefaultCard({
   narrative,
-  onUnlockClick,
   onInvestigateClick,
 }: {
   narrative: VisibleNarrative;
-  onUnlockClick?: () => void;
   onInvestigateClick?: (id: string) => void;
 }) {
-  const { isSignedIn } = useAuth();
-
   function handleInvestigate() {
-    if (!isSignedIn) { onUnlockClick?.(); return; }
     onInvestigateClick?.(narrative.id);
   }
 
@@ -772,11 +752,15 @@ function DefaultCard({
 }
 
 /* ============================================================
-   BLURRED CARD (locked state — unchanged)
+   BLURRED CARD (neutral placeholder)
    ============================================================ */
-function BlurredCard({ onUnlockClick }: { onUnlockClick?: () => void }) {
+function BlurredCard() {
   return (
-    <div className="relative overflow-hidden h-44">
+    <article
+      data-testid="blurred-card"
+      className="relative overflow-hidden h-44"
+      aria-label="Narrative unavailable"
+    >
       <div
         className="absolute inset-0 p-5"
         style={{ background: "var(--bg-surface)", border: "1px solid var(--bg-border)" }}
@@ -785,18 +769,15 @@ function BlurredCard({ onUnlockClick }: { onUnlockClick?: () => void }) {
         <div className="h-3 rounded w-full mb-1" style={{ background: "var(--bg-border)" }} />
         <div className="h-3 rounded w-5/6" style={{ background: "var(--bg-border)" }} />
       </div>
-      <button
-        className="absolute inset-0 flex flex-col items-center justify-center gap-2 cursor-pointer transition-all focus:outline-none"
+      <div
+        className="absolute inset-0 flex flex-col items-center justify-center gap-2"
         style={{ background: "var(--bg-surface)", opacity: 0.85 }}
-        onClick={onUnlockClick}
-        aria-label="Locked narrative — sign up to unlock"
       >
-        <Lock size={18} style={{ color: "var(--text-muted)" }} />
         <span style={{ color: "var(--text-muted)", fontSize: "var(--text-small)", fontWeight: 500 }}>
-          Sign up to unlock
+          Narrative unavailable
         </span>
-      </button>
-    </div>
+      </div>
+    </article>
   );
 }
 
@@ -807,23 +788,22 @@ export default function NarrativeCard({
   narrative,
   variant,
   showSummary,
-  onUnlockClick,
   onInvestigateClick,
 }: Props) {
   if (narrative.blurred) {
-    return <BlurredCard onUnlockClick={onUnlockClick} />;
+    return <BlurredCard />;
   }
 
   const vis = narrative as VisibleNarrative;
 
   switch (variant) {
     case "hero":
-      return <HeroCard narrative={vis} onUnlockClick={onUnlockClick} onInvestigateClick={onInvestigateClick} />;
+      return <HeroCard narrative={vis} onInvestigateClick={onInvestigateClick} />;
     case "secondary":
-      return <SecondaryCard narrative={vis} showSummary={showSummary} onUnlockClick={onUnlockClick} onInvestigateClick={onInvestigateClick} />;
+      return <SecondaryCard narrative={vis} showSummary={showSummary} onInvestigateClick={onInvestigateClick} />;
     case "compact":
-      return <CompactRow narrative={vis} onUnlockClick={onUnlockClick} onInvestigateClick={onInvestigateClick} />;
+      return <CompactRow narrative={vis} onInvestigateClick={onInvestigateClick} />;
     default:
-      return <DefaultCard narrative={vis} onUnlockClick={onUnlockClick} onInvestigateClick={onInvestigateClick} />;
+      return <DefaultCard narrative={vis} onInvestigateClick={onInvestigateClick} />;
   }
 }

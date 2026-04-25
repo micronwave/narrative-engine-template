@@ -156,7 +156,6 @@ Copy `.env.example` to `.env`. Only `ANTHROPIC_API_KEY` is required. Settings va
 
 Key settings beyond the basics:
 - `PIPELINE_FREQUENCY_HOURS: int = 4` — Task Scheduler interval
-- `BURST_VELOCITY_WINDOW_HOURS: int = 2` — burst detection lookback
 - `BURST_VELOCITY_ALERT_RATIO: float = 3.0` — ratio threshold for SURGE
 - `FINNHUB_API_KEY` — enables live stock prices
 - `IMPACT_SCORE_REFRESH_SECONDS: int = 600` — narrative impact score refresh

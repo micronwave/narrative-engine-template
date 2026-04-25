@@ -281,11 +281,6 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers;
 }
 
-/** H7: Builds fetch options with credentials: "include" for HttpOnly cookie auth. */
-function authFetch(extra?: RequestInit): RequestInit {
-  return { credentials: "include" as RequestCredentials, ...extra };
-}
-
 // ---------------------------------------------------------------------------
 // Fetch helpers — always call relative /api/* paths (proxied in dev)
 // ---------------------------------------------------------------------------
@@ -354,7 +349,7 @@ export async function useCredit(token: string): Promise<InvestigationCredit> {
 }
 
 // ---------------------------------------------------------------------------
-// C4 API helpers
+// Phase 2 removal targets — keep for now while backend auth/monetization stays
 // ---------------------------------------------------------------------------
 
 export async function fetchSubscription(token: string): Promise<SubscriptionStatus> {

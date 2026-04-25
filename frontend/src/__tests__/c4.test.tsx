@@ -19,13 +19,12 @@ import {
   render,
   screen,
   fireEvent,
-  waitFor,
-  act,
 } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 import ConstellationMap from "../components/ConstellationMap";
 import MutationTimeline from "../components/MutationTimeline";
+import NarrativeCard from "../components/NarrativeCard";
 import { AuthContext } from "../contexts/AuthContext";
 import { SubscriptionContext } from "../contexts/SubscriptionContext";
 import type {
@@ -335,7 +334,7 @@ describe("C4-U6: MutationTimeline entry content", () => {
 
 describe("C4-U7: Signal coordination flag badge", () => {
   it("renders amber Coordination Flag badge for flagged signals", () => {
-    const { container } = render(
+    render(
       <div>
         {/* Simulate what signals/page.tsx renders */}
         <article data-testid="sig-flagged">
@@ -395,25 +394,14 @@ describe("C4-I2: Export button enabled for signed-in user", () => {
 
 describe("C4-E1: End-to-End analyst workflow", () => {
   // ---- Guest flow: blurred card triggers CTA ----
-  it("guest: NarrativeCard blurred state renders and triggers CTA on click", () => {
-    const onUnlock = jest.fn();
+  it("guest: NarrativeCard blurred state renders neutral placeholder", () => {
     renderWith(
-      <div
-        data-testid="blurred-card"
-        role="button"
-        aria-label="Locked narrative — sign up to unlock"
-        onClick={onUnlock}
-        style={{ backdropFilter: "blur(8px)" }}
-      >
-        <span>Sign up to unlock</span>
-      </div>,
+      <NarrativeCard narrative={{ id: "nar-002", blurred: true }} />,
       { auth: guestAuth }
     );
 
-    const card = screen.getByTestId("blurred-card");
-    expect(card).toBeInTheDocument();
-    fireEvent.click(card);
-    expect(onUnlock).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("blurred-card")).toBeInTheDocument();
+    expect(screen.queryByText(/sign up to unlock/i)).not.toBeInTheDocument();
   });
 
   // ---- Subscriber: no blurred cards, export enabled ----

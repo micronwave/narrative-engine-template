@@ -1,7 +1,7 @@
 /**
  * C2 Frontend Tests (updated for D4 — monetization removed)
  * C2-I1: NarrativeCard visible state receives velocity_timeseries and renders sparkline
- * C2-A1: Guest clicks Investigate → sign-up modal appears
+ * C2-A1: Guest clicks Investigate → onInvestigateClick called (no sign-up gate)
  * C2-A2: Signed-in user clicks Investigate → onInvestigateClick called (opens drawer)
  */
 
@@ -82,10 +82,10 @@ describe("C2-I1: NarrativeCard velocity sparkline", () => {
 
 // C2-A1
 describe("C2-A1: Guest Investigate flow", () => {
-  it("shows sign-up CTA when guest clicks Investigate", () => {
-    const mockUnlockClick = jest.fn();
+  it("calls onInvestigateClick when guest clicks Investigate", () => {
+    const mockInvestigate = jest.fn();
     renderWithAuth(
-      <NarrativeCard narrative={MOCK_VISIBLE} onUnlockClick={mockUnlockClick} />,
+      <NarrativeCard narrative={MOCK_VISIBLE} onInvestigateClick={mockInvestigate} />,
       guestAuth
     );
 
@@ -94,7 +94,7 @@ describe("C2-A1: Guest Investigate flow", () => {
 
     fireEvent.click(investigateBtn);
 
-    expect(mockUnlockClick).toHaveBeenCalledTimes(1);
+    expect(mockInvestigate).toHaveBeenCalledWith("nar-001");
     expect(mockPush).not.toHaveBeenCalled();
   });
 });
@@ -110,7 +110,6 @@ describe("C2-A2: Signed-in Investigate flow", () => {
     renderWithAuth(
       <NarrativeCard
         narrative={MOCK_VISIBLE}
-        onUnlockClick={jest.fn()}
         onInvestigateClick={mockInvestigate}
       />,
       signedInAuth

@@ -27,7 +27,6 @@ import "@testing-library/jest-dom";
 
 import ManipulationPage from "../app/manipulation/page";
 import NarrativeCard from "../components/NarrativeCard";
-import InvestigateDrawer from "../components/InvestigateDrawer";
 import { AuthContext } from "../contexts/AuthContext";
 import type { ManipulationNarrative, VisibleNarrative, NarrativeDetail } from "../lib/api";
 
@@ -546,7 +545,7 @@ describe("D4-I6: No monetization text on gateway page", () => {
     mockFetchTicker.mockResolvedValue([]);
   });
 
-  it("gateway page has no credits/billing/subscribe/upgrade text", async () => {
+  it("gateway page has no credits/billing/subscribe/upgrade or sign-in text", async () => {
     const GatewayPage = (await import("../app/page")).default;
     withAuth(<GatewayPage />, guestAuth);
     await waitFor(() => {
@@ -555,5 +554,7 @@ describe("D4-I6: No monetization text on gateway page", () => {
     expect(screen.queryByText(/billing/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/subscribe/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/upgrade/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/sign in/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/sign out/i)).not.toBeInTheDocument();
   });
 });

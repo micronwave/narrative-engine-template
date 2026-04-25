@@ -31,8 +31,8 @@ function NarrativeRadarWidget({ compact }: { compact?: boolean }) {
   });
   if (isLoading) return <LoadingState label="Narrative Radar" />;
   const narratives = (Array.isArray(data) ? data : [])
-    .filter((n) => !n.blurred)
-    .slice(0, compact ? 3 : 5) as VisibleNarrative[];
+    .filter((n): n is VisibleNarrative => !n.blurred)
+    .slice(0, compact ? 3 : 5);
   return (
     <div data-testid="widget-body-narrative_radar" className="overflow-y-auto h-full p-2">
       {narratives.length === 0 ? (

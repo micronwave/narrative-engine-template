@@ -3,7 +3,7 @@
  *
  * Unit:
  *   C3-U1: NarrativeCard visible — renders name, descriptor, velocity_summary; aria-label present
- *   C3-U2: NarrativeCard blurred — renders lock overlay; click triggers CTA callback
+ *   C3-U2: NarrativeCard blurred — renders neutral placeholder with no paywall copy
  *   C3-U3: NarrativeCard — switches visible/blurred based on prop
  *   C3-U4: VelocitySparkline — 7 points → SVG polyline; last>first = green stroke
  *   C3-U5: SaturationMeter — saturation 0.45 → ~45% width; saturation 0.8 → red color
@@ -18,7 +18,6 @@ import React from "react";
 import {
   render,
   screen,
-  fireEvent,
   act,
   waitFor,
 } from "@testing-library/react";
@@ -158,26 +157,25 @@ describe("C3-U1: NarrativeCard visible fields", () => {
 });
 
 // ---------------------------------------------------------------------------
-// C3-U2: NarrativeCard blurred renders lock overlay + CTA
+// C3-U2: NarrativeCard blurred renders neutral placeholder
 // ---------------------------------------------------------------------------
 
 describe("C3-U2: NarrativeCard blurred overlay", () => {
-  it("renders lock overlay and calls onUnlockClick on click", () => {
-    const mockUnlock = jest.fn();
+  it("renders a neutral placeholder without paywall copy", () => {
     renderWithContexts(
       <NarrativeCard
         narrative={{ id: "nar-002", blurred: true }}
-        onUnlockClick={mockUnlock}
       />,
       guestAuth
     );
 
-    const lockBtn = screen.getByRole("button", {
-      name: /sign up to unlock/i,
-    });
-    expect(lockBtn).toBeInTheDocument();
-    fireEvent.click(lockBtn);
-    expect(mockUnlock).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("blurred-card")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/sign up to unlock/i)
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /unlock/i })
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -189,9 +187,7 @@ describe("C3-U3: NarrativeCard visible/blurred switch", () => {
   it("renders visible card when blurred=false", () => {
     renderWithContexts(<NarrativeCard narrative={MOCK_VISIBLE} />, guestAuth);
     expect(screen.getByRole("article")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /sign up to unlock/i })
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/sign up to unlock/i)).not.toBeInTheDocument();
   });
 
   it("renders blurred card when blurred=true", () => {
@@ -199,10 +195,8 @@ describe("C3-U3: NarrativeCard visible/blurred switch", () => {
       <NarrativeCard narrative={{ id: "nar-002", blurred: true }} />,
       guestAuth
     );
-    expect(screen.queryByRole("article")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /sign up to unlock/i })
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("blurred-card")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /unlock/i })).not.toBeInTheDocument();
   });
 });
 
