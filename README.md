@@ -40,8 +40,6 @@ Each step is non-fatal — if one stage throws, it logs the error and the pipeli
 
 **Frontend:** Next.js 14 (App Router), TypeScript, Tailwind. Dark terminal aesthetic — no component library, custom design system with ~65 CSS variables. Palantir Blueprint color palette.
 
-**Ops:** Flask dashboard on port 5000 for pipeline monitoring.
-
 **Price data:** Finnhub (primary), TwelveData and CoinGecko available as secondary adapters behind a circuit breaker. WebSocket relay for real-time ticks.
 
 ## Setup
@@ -75,10 +73,6 @@ uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 
 # Frontend (proxies /api/* to port 8000)
 cd frontend && npm run dev
-
-# Ops dashboard
-python dashboard/app.py
-```
 
 On Windows, `run_pipeline.bat` is the Task Scheduler entry point — set it to run every 4 hours with wake-to-run enabled. Logs go to `logs/`.
 
@@ -128,7 +122,7 @@ Each narrative also gets 1-3 topic tags from the LLM: `regulatory`, `earnings`, 
 | `api/services/` | Circuit breaker, data normalizer, WebSocket relay |
 | `api/adapters/` | Finnhub, TwelveData, CoinGecko price adapters |
 
-Extension modules (notifications, portfolio, watchlist, chat, export) are manager-pattern classes instantiated in `api/main.py`.
+Extension modules (notifications, portfolio, watchlist, export) are manager-pattern classes instantiated in `api/main.py`.
 
 ## Tests
 

@@ -13,7 +13,9 @@ import {
   fetchStocks,
   fetchUpcomingEarnings,
   fetchWatchlist,
+  type AlertNotification,
   type Narrative,
+  type SignalLeaderboardEntry,
   type VisibleNarrative,
 } from "@/lib/api";
 
@@ -86,13 +88,7 @@ function NarrativeRadarWidget({ compact }: { compact?: boolean }) {
 }
 
 // ─── 2. Signal Leaderboard ────────────────────────────────────────────────────
-type SignalEntry = {
-  narrative_id: string;
-  name: string;
-  direction: string;
-  confidence: number;
-  stage?: string;
-};
+type SignalEntry = Pick<SignalLeaderboardEntry, "narrative_id" | "name" | "direction" | "confidence" | "stage">;
 type LeaderboardResponse = SignalEntry[] | { signals: SignalEntry[] };
 
 function SignalLeaderboardWidget({ compact }: { compact?: boolean }) {
@@ -263,7 +259,10 @@ type AlertItem = {
 function AlertFeedWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<AlertItem[]>({
     queryKey: ["alerts-feed"],
-    queryFn: () => fetchAlerts() as Promise<AlertItem[]>,
+    queryFn: async () => {
+      const alerts: AlertNotification[] = await fetchAlerts();
+      return alerts.map((a) => ({ ...a, is_read: Boolean(a.is_read) }));
+    },
   });
   if (isLoading) return <LoadingState label="Alert Feed" />;
   const alerts = (Array.isArray(data) ? data : [])

@@ -3,9 +3,6 @@ Narrative Engine — FastAPI public API (customer-facing).
 
 Run from project root:
     python -m uvicorn api.main:app --port 8000 --reload
-
-The Flask ops dashboard continues on port 5000 (dashboard/app.py) and is
-completely independent. Both read from the same SQLite DB.
 """
 
 import asyncio

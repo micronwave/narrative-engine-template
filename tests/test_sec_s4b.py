@@ -5,7 +5,6 @@ Tests:
   - safe_pickle.py: RestrictedUnpickler blocks forbidden classes
   - safe_pickle.py: safe_load allows permitted classes
   - All 6 pickle.load sites replaced (source inspection)
-  - dashboard/app.py migrated to shared safe_pickle module
 
 Run with:
     python -X utf8 tests/test_sec_s4b.py
@@ -211,31 +210,6 @@ T("test_phase5_integration.py: no raw pickle.load",
 
 
 # ===================================================================
-# M7 — dashboard/app.py migrated to shared safe_pickle
-# ===================================================================
-
-S("M7 — dashboard/app.py uses shared safe_pickle")
-
-dashboard_path = ROOT / "dashboard" / "app.py"
-dashboard_source = dashboard_path.read_text(encoding="utf-8")
-
-T("dashboard imports from safe_pickle",
-  "from safe_pickle import" in dashboard_source,
-  "safe_pickle import not found")
-
-T("dashboard no longer defines _RestrictedUnpickler",
-  "_RestrictedUnpickler" not in dashboard_source,
-  "_RestrictedUnpickler still present")
-
-T("safe_pickle_load still present in dashboard",
-  "def safe_pickle_load" in dashboard_source,
-  "safe_pickle_load function missing")
-
-T("safe_pickle.py exists",
-  (ROOT / "safe_pickle.py").exists())
-
-
-# ===================================================================
 # M7 — safe_pickle.py is importable and has correct interface
 # ===================================================================
 
@@ -312,8 +286,12 @@ _SYMBOL_FUNCS = [
     "def get_price_history_endpoint(",
 ]
 for _fn in _SYMBOL_FUNCS:
+    _idx = _main_source.find(_fn)
+    _block = _main_source[_idx:_idx + 600] if _idx >= 0 else ""
+    _end = _block.find("):") + 2 if "):" in _block else len(_block)
+    _sig_block = _block[:_end]
+    _found = _idx >= 0 and "FPath" in _sig_block and "max_length=12" in _sig_block
     _sig_lines = [l for l in _main_source.splitlines() if _fn in l]
-    _found = len(_sig_lines) > 0 and any("FPath" in l and "max_length=12" in l for l in _sig_lines)
     T(f"{_fn.strip('def (')}: symbol/ticker has FPath max_length=12", _found,
       f"sig: {_sig_lines[0][:80] if _sig_lines else 'NOT FOUND'}")
 

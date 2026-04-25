@@ -17,9 +17,6 @@ uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 # Run the Next.js frontend (port 3000, proxies /api/* to 8000)
 cd frontend && npm run dev
 
-# Run the Flask ops dashboard (port 5000)
-python dashboard/app.py
-
 # Backend tests (from project root, always use -X utf8 on Windows)
 python -X utf8 tests/test_c2_api.py    # or any test_*.py in tests/
 python -X utf8 tests/test_f1_api.py
@@ -38,13 +35,12 @@ No lint step. Backend is pure Python, frontend is Next.js with Tailwind.
 
 ## Architecture
 
-Three services run concurrently:
+Two services run concurrently:
 
 | Service | Port | Entry Point |
 |---------|------|-------------|
 | FastAPI API | 8000 | `api/main.py` (~66 endpoints) |
 | Next.js frontend | 3000 | `frontend/` (proxies `/api/*` → 8000) |
-| Flask ops dashboard | 5000 | `dashboard/app.py` |
 
 ### Pipeline (`pipeline.py`)
 
@@ -141,7 +137,6 @@ Manager-pattern classes instantiated in `api/main.py`, backed by `SqliteReposito
 - `NotificationManager` (`notifications.py`) — rules-based alerting (rule types: `ns_above`, `ns_below`, `new_narrative`, `mutation`, `stage_change`, `catalyst`)
 - `PortfolioManager` (`portfolio.py`) — holdings tracking, narrative impact scoring, CSV import (max 1000 rows)
 - `WatchlistManager` (`watchlist.py`) — ticker/narrative watchlists
-- `ChatManager` (`chat.py`) — multi-turn Haiku Q&A with persistent sessions, built-in prompt templates
 - `ExportManager` (`export.py`) — JSON/CSV export, social share text generation
 
 ### Signal Redesign Modules

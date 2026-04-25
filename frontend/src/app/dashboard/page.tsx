@@ -36,7 +36,15 @@ export default function DashboardPage() {
     fetchDashboardLayout()
       .then((data) => {
         if (data?.widgets && Array.isArray(data.widgets)) {
-          setWidgets(data.widgets);
+          const allowedTypes = new Set(WIDGET_DEFINITIONS.map((d) => d.type));
+          const normalizedWidgets: DashboardWidget[] = data.widgets
+            .filter((w) => allowedTypes.has(w.type as WidgetType))
+            .map((w) => ({ ...w, type: w.type as WidgetType }));
+          if (data.widgets.length === 0) {
+            setWidgets([]);
+          } else if (normalizedWidgets.length > 0) {
+            setWidgets(normalizedWidgets);
+          }
         }
         if (data?.grid) {
           setGridLayout(data.grid);

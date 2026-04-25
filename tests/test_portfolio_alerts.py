@@ -394,13 +394,12 @@ else:
 S("Test 11 — check_rules() channel dispatch (Part A)")
 
 try:
-    import shutil, sqlite3
+    import sqlite3
     from notifications import NotificationManager
     from repository import SqliteRepository
 
-    _tmpdir = tempfile.mkdtemp()
     try:
-        _db_path = Path(_tmpdir) / "test_dispatch.db"
+        _db_path = Path(tempfile.gettempdir()) / f"test_dispatch_{uuid.uuid4().hex}.db"
         _repo = SqliteRepository(str(_db_path))
         _repo.migrate()
         _mgr = NotificationManager(_repo)
@@ -433,7 +432,10 @@ try:
             T("check_rules() triggers at least one notification", len(triggered) >= 1, str(len(triggered)))
             T("DiscordWebhookChannel.send() called once per notification", _disc_mock.call_count == len(triggered), f"calls={_disc_mock.call_count} triggered={len(triggered)}")
     finally:
-        shutil.rmtree(_tmpdir, ignore_errors=True)
+        try:
+            _db_path.unlink()
+        except Exception:
+            pass
 except Exception as _e:
     T("check_rules() dispatch integration", False, str(_e))
 

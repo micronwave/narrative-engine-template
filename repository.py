@@ -332,43 +332,6 @@ class Repository(ABC):
         """Sum of ns_scores for all narratives linked to this ticker."""
         ...
 
-    # --- Chat Operations ---
-
-    @abstractmethod
-    def create_chat_session(self, session: dict) -> None:
-        """Insert a new chat session."""
-        ...
-
-    @abstractmethod
-    def get_chat_session(self, session_id: str) -> dict | None:
-        """Get chat session by id."""
-        ...
-
-    @abstractmethod
-    def list_chat_sessions(self, user_id: str, limit: int = 20) -> list[dict]:
-        """List user's sessions ordered by updated_at DESC."""
-        ...
-
-    @abstractmethod
-    def update_chat_session_timestamp(self, session_id: str) -> None:
-        """Update session's updated_at to now."""
-        ...
-
-    @abstractmethod
-    def save_chat_message(self, message: dict) -> None:
-        """Insert a chat message."""
-        ...
-
-    @abstractmethod
-    def get_chat_messages(self, session_id: str) -> list[dict]:
-        """Get all messages for session ordered by created_at ASC."""
-        ...
-
-    @abstractmethod
-    def delete_chat_session(self, session_id: str) -> None:
-        """Delete session and all its messages."""
-        ...
-
     # --- API Usage Tracking ---
 
     @abstractmethod
@@ -1027,29 +990,6 @@ class SqliteRepository(Repository):
                     requests_limit INTEGER,
                     last_request_at TEXT,
                     UNIQUE(api_name, date)
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_sessions (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL DEFAULT 'local',
-                    narrative_id TEXT,
-                    ticker TEXT,
-                    title TEXT,
-                    created_at TEXT,
-                    updated_at TEXT,
-                    is_active INTEGER DEFAULT 1
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    tokens_used INTEGER DEFAULT 0,
-                    cost REAL DEFAULT 0,
-                    created_at TEXT
                 )
             """)
             conn.execute("""
@@ -2530,65 +2470,6 @@ class SqliteRepository(Repository):
         """Sum of ns_scores for all narratives linked to this ticker."""
         narratives = self.get_narratives_for_ticker(ticker)
         return round(sum(n["ns_score"] or 0.0 for n in narratives), 4)
-
-    # --- Chat Operations ---
-
-    def create_chat_session(self, session: dict) -> None:
-        with self._get_conn() as conn:
-            safe_cols = self._sanitize_columns(session.keys())
-            cols = ", ".join(safe_cols)
-            placeholders = ", ".join("?" * len(safe_cols))
-            conn.execute(
-                f"INSERT INTO chat_sessions ({cols}) VALUES ({placeholders})",
-                list(session.values()),
-            )
-
-    def get_chat_session(self, session_id: str) -> dict | None:
-        with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
-            ).fetchone()
-            return dict(row) if row else None
-
-    def list_chat_sessions(self, user_id: str, limit: int = 20) -> list[dict]:
-        with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM chat_sessions WHERE user_id = ? AND is_active = 1 "
-                "ORDER BY updated_at DESC LIMIT ?",
-                (user_id, limit),
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    def update_chat_session_timestamp(self, session_id: str) -> None:
-        from datetime import datetime, timezone
-        with self._get_conn() as conn:
-            conn.execute(
-                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), session_id),
-            )
-
-    def save_chat_message(self, message: dict) -> None:
-        with self._get_conn() as conn:
-            safe_cols = self._sanitize_columns(message.keys())
-            cols = ", ".join(safe_cols)
-            placeholders = ", ".join("?" * len(safe_cols))
-            conn.execute(
-                f"INSERT INTO chat_messages ({cols}) VALUES ({placeholders})",
-                list(message.values()),
-            )
-
-    def get_chat_messages(self, session_id: str) -> list[dict]:
-        with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
-                (session_id,),
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    def delete_chat_session(self, session_id: str) -> None:
-        with self._get_conn() as conn:
-            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
 
     # --- API Usage Tracking ---
 

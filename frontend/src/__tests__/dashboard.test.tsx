@@ -144,6 +144,38 @@ describe("DashboardPage", () => {
     });
     expect(screen.getByTestId("edit-dashboard-btn")).toBeInTheDocument();
   });
+
+  it("respects an empty saved widget layout", async () => {
+    const fetchMock = global.fetch as jest.Mock;
+    const previousImpl = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url: unknown, ...rest: unknown[]) => {
+      if (String(url).includes("/api/dashboard/layout")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            widgets: [],
+            grid: { lg: [] },
+          }),
+        } as Response);
+      }
+      return previousImpl ? previousImpl(url, ...rest) : Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+
+    try {
+      const { default: DashboardPage } = await import("../app/dashboard/page");
+      await act(async () => {
+        render(<DashboardPage />, { wrapper: makeWrapper() });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("dashboard-grid")).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("widget-body-narrative_radar")).toBeNull();
+      expect(screen.queryByTestId("widget-body-alert_feed")).toBeNull();
+    } finally {
+      fetchMock.mockImplementation(previousImpl);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
