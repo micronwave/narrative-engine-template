@@ -376,10 +376,24 @@ describe("C4-I2: Export button enabled for signed-in user", () => {
 // ---------------------------------------------------------------------------
 
 describe("C4-E1: End-to-End analyst workflow", () => {
-  // ---- Guest flow: fallback payload still renders a visible card ----
-  it("guest: NarrativeCard fallback payload renders visible card", () => {
+  // ---- Guest flow: sparse visible payload still renders a visible card ----
+  it("guest: NarrativeCard sparse payload renders visible card", () => {
     renderWith(
-      <NarrativeCard narrative={{ id: "nar-002", blurred: true }} />,
+      <NarrativeCard
+        narrative={{
+          id: "nar-002",
+          name: "Narrative",
+          descriptor: "Narrative data is loading.",
+          velocity_summary: "+0.0% signal velocity over 7d",
+          entropy: null,
+          saturation: 0,
+          velocity_timeseries: [],
+          signals: [],
+          catalysts: [],
+          mutations: [],
+          blurred: false,
+        }}
+      />,
       { auth: guestAuth }
     );
 

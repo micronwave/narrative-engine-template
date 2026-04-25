@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Search, ArrowUp, ArrowDown, Minus, Telescope, Radar, Star } from "lucide-react";
-import type { Narrative, VisibleNarrative } from "@/lib/api";
+import type { VisibleNarrative } from "@/lib/api";
 import { useWatchlist } from "@/contexts/WatchlistContext";
 import VelocitySparkline from "./VelocitySparkline";
 import MomentumBar from "./MomentumBar";
@@ -10,31 +10,12 @@ import MiniAreaChart from "./MiniAreaChart";
 import SignalBadge from "./SignalBadge";
 
 type Props = {
-  narrative: Narrative;
+  narrative: VisibleNarrative;
   variant?: "hero" | "secondary" | "compact";
   /** For secondary variant: show one-line summary */
   showSummary?: boolean;
   onInvestigateClick?: (id: string) => void;
 };
-
-function toVisibleNarrative(narrative: Narrative): VisibleNarrative {
-  if (!("blurred" in narrative) || narrative.blurred === false) {
-    return narrative as VisibleNarrative;
-  }
-  return {
-    id: narrative.id,
-    name: "Narrative",
-    descriptor: "Narrative data is loading.",
-    velocity_summary: "+0.0% signal velocity over 7d",
-    entropy: null,
-    saturation: 0,
-    velocity_timeseries: [],
-    signals: [],
-    catalysts: [],
-    mutations: [],
-    blurred: false,
-  };
-}
 
 /** Parse numeric velocity from summary string like "+13.6% signal velocity over 7d" */
 function parseVelocity(summary: string): number {
@@ -779,16 +760,14 @@ export default function NarrativeCard({
   showSummary,
   onInvestigateClick,
 }: Props) {
-  const vis = toVisibleNarrative(narrative);
-
   switch (variant) {
     case "hero":
-      return <HeroCard narrative={vis} onInvestigateClick={onInvestigateClick} />;
+      return <HeroCard narrative={narrative} onInvestigateClick={onInvestigateClick} />;
     case "secondary":
-      return <SecondaryCard narrative={vis} showSummary={showSummary} onInvestigateClick={onInvestigateClick} />;
+      return <SecondaryCard narrative={narrative} showSummary={showSummary} onInvestigateClick={onInvestigateClick} />;
     case "compact":
-      return <CompactRow narrative={vis} onInvestigateClick={onInvestigateClick} />;
+      return <CompactRow narrative={narrative} onInvestigateClick={onInvestigateClick} />;
     default:
-      return <DefaultCard narrative={vis} onInvestigateClick={onInvestigateClick} />;
+      return <DefaultCard narrative={narrative} onInvestigateClick={onInvestigateClick} />;
   }
 }

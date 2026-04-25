@@ -3,8 +3,8 @@
  *
  * Unit:
  *   C3-U1: NarrativeCard visible — renders name, descriptor, velocity_summary; aria-label present
- *   C3-U2: NarrativeCard fallback payload renders visible card (no lock/paywall state)
- *   C3-U3: NarrativeCard renders article for both full and fallback payloads
+ *   C3-U2: NarrativeCard renders visible card with no lock/paywall state
+ *   C3-U3: NarrativeCard renders article for complete and sparse visible payloads
  *   C3-U4: VelocitySparkline — 7 points → SVG polyline; last>first = green stroke
  *   C3-U5: SaturationMeter — saturation 0.45 → ~45% width; saturation 0.8 → red color
  *   C3-U6: InvestigateDrawer — opens with narrativeId; renders name + evidence
@@ -157,14 +157,26 @@ describe("C3-U1: NarrativeCard visible fields", () => {
 });
 
 // ---------------------------------------------------------------------------
-// C3-U2: NarrativeCard fallback payload renders visible card
+// C3-U2: NarrativeCard renders visible card
 // ---------------------------------------------------------------------------
 
-describe("C3-U2: NarrativeCard fallback payload", () => {
+describe("C3-U2: NarrativeCard visible payload", () => {
   it("renders as visible card without paywall copy", () => {
     renderWithContexts(
       <NarrativeCard
-        narrative={{ id: "nar-002", blurred: true }}
+        narrative={{
+          id: "nar-002",
+          name: "Narrative",
+          descriptor: "Narrative data is loading.",
+          velocity_summary: "+0.0% signal velocity over 7d",
+          entropy: null,
+          saturation: 0,
+          velocity_timeseries: [],
+          signals: [],
+          catalysts: [],
+          mutations: [],
+          blurred: false,
+        }}
       />,
       guestAuth
     );
@@ -180,19 +192,33 @@ describe("C3-U2: NarrativeCard fallback payload", () => {
 });
 
 // ---------------------------------------------------------------------------
-// C3-U3: NarrativeCard renders article for visible and fallback payloads
+// C3-U3: NarrativeCard renders article for complete and sparse payloads
 // ---------------------------------------------------------------------------
 
-describe("C3-U3: NarrativeCard visible/fallback switch", () => {
+describe("C3-U3: NarrativeCard visible payload variants", () => {
   it("renders visible card when blurred=false", () => {
     renderWithContexts(<NarrativeCard narrative={MOCK_VISIBLE} />, guestAuth);
     expect(screen.getByRole("article")).toBeInTheDocument();
     expect(screen.queryByText(/sign up to unlock/i)).not.toBeInTheDocument();
   });
 
-  it("renders visible fallback card when blurred=true", () => {
+  it("renders visible sparse card when payload is minimal", () => {
     renderWithContexts(
-      <NarrativeCard narrative={{ id: "nar-002", blurred: true }} />,
+      <NarrativeCard
+        narrative={{
+          id: "nar-002",
+          name: "Narrative",
+          descriptor: "Narrative data is loading.",
+          velocity_summary: "+0.0% signal velocity over 7d",
+          entropy: null,
+          saturation: 0,
+          velocity_timeseries: [],
+          signals: [],
+          catalysts: [],
+          mutations: [],
+          blurred: false,
+        }}
+      />,
       guestAuth
     );
     expect(screen.getByRole("article")).toBeInTheDocument();

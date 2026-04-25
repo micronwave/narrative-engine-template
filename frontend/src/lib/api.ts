@@ -32,12 +32,7 @@ export type VisibleNarrative = {
   blurred: false;
 };
 
-export type BlurredNarrative = {
-  id: string;
-  blurred: true;
-};
-
-export type Narrative = VisibleNarrative | BlurredNarrative;
+export type Narrative = VisibleNarrative;
 
 export type TickerItem = {
   id?: string | null; // optional — added in C4 for click navigation

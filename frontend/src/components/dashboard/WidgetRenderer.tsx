@@ -14,9 +14,8 @@ import {
   fetchUpcomingEarnings,
   fetchWatchlist,
   type AlertNotification,
-  type Narrative,
   type SignalLeaderboardEntry,
-  type VisibleNarrative,
+  type Narrative,
 } from "@/lib/api";
 
 interface WidgetRendererProps {
@@ -26,25 +25,6 @@ interface WidgetRendererProps {
   isEditing: boolean;
   compact?: boolean;
   onRemove: (id: string) => void;
-}
-
-function asVisibleNarrative(narrative: Narrative): VisibleNarrative {
-  if (!("blurred" in narrative) || narrative.blurred === false) {
-    return narrative as VisibleNarrative;
-  }
-  return {
-    id: narrative.id,
-    name: "Narrative",
-    descriptor: "Narrative data is loading.",
-    velocity_summary: "+0.0% signal velocity over 7d",
-    entropy: null,
-    saturation: 0,
-    velocity_timeseries: [],
-    signals: [],
-    catalysts: [],
-    mutations: [],
-    blurred: false,
-  };
 }
 
 // Shared loading placeholder — keeps the original "loading…" text for each type
@@ -63,9 +43,7 @@ function NarrativeRadarWidget({ compact }: { compact?: boolean }) {
     queryFn: fetchNarratives,
   });
   if (isLoading) return <LoadingState label="Narrative Radar" />;
-  const narratives = (Array.isArray(data) ? data : [])
-    .map(asVisibleNarrative)
-    .slice(0, compact ? 3 : 5);
+  const narratives = (Array.isArray(data) ? data : []).slice(0, compact ? 3 : 5);
   return (
     <div data-testid="widget-body-narrative_radar" className="overflow-y-auto h-full p-2">
       {narratives.length === 0 ? (

@@ -7,26 +7,6 @@ import InvestigateDrawer from "@/components/InvestigateDrawer";
 import SegmentedControl from "@/components/common/SegmentedControl";
 import MetricTooltip from "@/components/common/MetricTooltip";
 import { fetchNarratives, type VisibleNarrative } from "@/lib/api";
-import type { Narrative } from "@/lib/api";
-
-function asVisibleNarrative(narrative: Narrative): VisibleNarrative {
-  if (!("blurred" in narrative) || narrative.blurred === false) {
-    return narrative as VisibleNarrative;
-  }
-  return {
-    id: narrative.id,
-    name: "Narrative",
-    descriptor: "Narrative data is loading.",
-    velocity_summary: "+0.0% signal velocity over 7d",
-    entropy: null,
-    saturation: 0,
-    velocity_timeseries: [],
-    signals: [],
-    catalysts: [],
-    mutations: [],
-    blurred: false,
-  };
-}
 
 /** Relative time for live sync display */
 function syncLabel(narratives: VisibleNarrative[]): string {
@@ -44,7 +24,7 @@ function syncLabel(narratives: VisibleNarrative[]): string {
 }
 
 export default function GatewayPage() {
-  const [narratives, setNarratives] = useState<Narrative[]>([]);
+  const [narratives, setNarratives] = useState<VisibleNarrative[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [drawerNarrativeId, setDrawerNarrativeId] = useState<string | null>(null);
@@ -80,7 +60,7 @@ export default function GatewayPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const allVisible = narratives.map(asVisibleNarrative);
+  const allVisible = narratives;
   const visibleNarratives = allVisible
     .filter((n) =>
       topicFilter === "all" ? true : (n.topic_tags || []).includes(topicFilter)
