@@ -1728,7 +1728,7 @@ except Exception as _e:
 
 # J12-J15: compute_lifecycle_stage lifecycle rules
 try:
-    # J12: Mature → Declining when consecutive_declining_cycles >= 18 and velocity < 0.01
+    # J12: Mature → Declining when consecutive_declining_cycles >= 18 and velocity < 0.008
     _stage12 = compute_lifecycle_stage(
         current_stage="Mature", document_count=30, velocity_windowed=0.005,
         entropy=2.0, consecutive_declining_cycles=19, days_since_creation=10,
@@ -1743,7 +1743,7 @@ try:
     )
     T("J13 compute_lifecycle_stage Emerging", _stage13 == "Emerging")
 
-    # J14: Emerging → Growing (doc_count >= 8, velocity > 0.05)
+    # J14: Emerging → Growing (doc_count >= 8, velocity > 0.02)
     _stage14 = compute_lifecycle_stage(
         current_stage="Emerging", document_count=10, velocity_windowed=0.5,
         entropy=1.0, consecutive_declining_cycles=0, days_since_creation=5,

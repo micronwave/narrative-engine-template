@@ -1886,8 +1886,8 @@ class SqliteRepository(Repository):
             datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
         ).isoformat()[:10]  # date portion
         with self._get_conn() as conn:
-            # Deduplicate to one entry per date (latest by rowid) so that
-            # velocity compares distinct days, not same-day pipeline runs.
+            # Deduplicate to one entry per cycle slot (latest by rowid) so that
+            # velocity compares distinct pipeline windows, not intra-slot noise.
             sql = """
                 SELECT id, narrative_id, date, centroid_blob FROM (
                     SELECT id, narrative_id, date, centroid_blob,

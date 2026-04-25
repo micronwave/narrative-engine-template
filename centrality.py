@@ -12,6 +12,8 @@ def build_narrative_graph(
     narratives: list[dict],
     vector_store: VectorStore,
     similarity_threshold: float = 0.40,
+    *,
+    unrecoverable_missing_ids: set[str] | None = None,
 ) -> nx.Graph:
     """
     Build an undirected graph where each node is an active narrative.
@@ -31,12 +33,31 @@ def build_narrative_graph(
     # Retrieve centroid vectors for all narratives in one pass.
     narrative_ids = [n["narrative_id"] for n in narratives]
     vectors: dict[str, np.ndarray] = {}
+    unrecoverable_missing_ids = unrecoverable_missing_ids or set()
+    benign_missing_ids: list[str] = []
+    unrecoverable_missing_seen: list[str] = []
     for nid in narrative_ids:
         v = vector_store.get_vector(nid)
         if v is not None:
             vectors[nid] = v.astype(np.float32)
         else:
-            logger.warning("No centroid vector for narrative %s — excluded from graph edges", nid)
+            if nid in unrecoverable_missing_ids:
+                unrecoverable_missing_seen.append(nid)
+            else:
+                benign_missing_ids.append(nid)
+
+    if unrecoverable_missing_seen:
+        logger.warning(
+            "Missing centroid vectors after backfill for %d narratives — excluded from graph edges: %s",
+            len(unrecoverable_missing_seen),
+            ", ".join(unrecoverable_missing_seen[:5]),
+        )
+    elif benign_missing_ids:
+        logger.debug(
+            "Missing centroid vectors for %d narratives with no backfill history — excluded from graph edges: %s",
+            len(benign_missing_ids),
+            ", ".join(benign_missing_ids[:5]),
+        )
 
     ids_with_vecs = list(vectors.keys())
 

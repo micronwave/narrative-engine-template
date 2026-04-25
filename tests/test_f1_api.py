@@ -3,9 +3,9 @@ F1 — Lifecycle Stage Progression Tests
 
 Unit:
   F1-U1: compute_lifecycle_stage returns "Emerging" for brand-new narrative
-  F1-U2: compute_lifecycle_stage returns "Growing" when doc_count >= 8 and velocity > 0.05
+  F1-U2: compute_lifecycle_stage returns "Growing" when doc_count >= 8 and velocity > 0.02
   F1-U3: compute_lifecycle_stage returns "Mature" when days >= 5, entropy >= 1.5, docs >= 15
-  F1-U4: compute_lifecycle_stage returns "Declining" when consecutive_declining >= 30 (or >= 18 with velocity < 0.01)
+  F1-U4: compute_lifecycle_stage returns "Declining" when consecutive_declining >= 30 (or >= 18 with velocity < 0.008)
   F1-U5: compute_lifecycle_stage returns "Dormant" when declining >= 42 and velocity < 0.01
   F1-U6: Revival — Declining + velocity > 0.10 returns "Growing"
   F1-U7: Cannot skip stages — Emerging with high entropy still returns "Growing" not "Mature"
@@ -54,20 +54,21 @@ result = compute_lifecycle_stage(
 T("returns Emerging", result == "Emerging", f"got {result}")
 
 # ===========================================================================
-# F1-U2: Growing when doc_count >= 8 and velocity > 0.05
+# F1-U2: Growing when doc_count >= 8 and velocity > 0.02
 # ===========================================================================
 S("F1-U2: Emerging → Growing")
 result = compute_lifecycle_stage(
-    current_stage="Emerging", document_count=10, velocity_windowed=0.08,
-    entropy=0.5, consecutive_declining_cycles=0, days_since_creation=3,
+    current_stage="Emerging", document_count=9, velocity_windowed=0.08,
+    entropy=0.5, consecutive_declining_cycles=0, days_since_creation=1,
     cycles_in_current_stage=3,
 )
 T("returns Growing", result == "Growing", f"got {result}")
 
 # Still Emerging if velocity too low
 result2 = compute_lifecycle_stage(
-    current_stage="Emerging", document_count=10, velocity_windowed=0.03,
-    entropy=0.5, consecutive_declining_cycles=0, days_since_creation=3,
+    current_stage="Emerging", document_count=9, velocity_windowed=0.015,
+    entropy=0.5, consecutive_declining_cycles=0, days_since_creation=1,
+    cycles_in_current_stage=3,
 )
 T("stays Emerging with low velocity", result2 == "Emerging", f"got {result2}")
 
@@ -112,7 +113,7 @@ result2 = compute_lifecycle_stage(
     entropy=2.0, consecutive_declining_cycles=19, days_since_creation=10,
     cycles_in_current_stage=3,
 )
-T("returns Declining (consecutive >= 18 and velocity < 0.01)", result2 == "Declining", f"got {result2}")
+T("returns Declining (consecutive >= 18 and velocity < 0.008)", result2 == "Declining", f"got {result2}")
 
 # ===========================================================================
 # F1-U5: Dormant when declining >= 42 and velocity < 0.01

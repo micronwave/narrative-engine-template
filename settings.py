@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     CONFIDENCE_ESCALATION_THRESHOLD: float = 0.35
     VELOCITY_WINDOW_DAYS: int = 7
     ENTROPY_VOCAB_WINDOW: int = 10
-    HDBSCAN_MIN_CLUSTER_SIZE: int = 8  # For smaller datasets, try 5 and 3 respectively
-    HDBSCAN_MIN_SAMPLES: int = 5  # For smaller datasets, try 5 and 3 respectively
+    HDBSCAN_MIN_CLUSTER_SIZE: int = 8
+    HDBSCAN_MIN_SAMPLES: int = 5
 
     # --- Asset mapping ---
     ASSET_MAPPING_MIN_SIMILARITY: float = 0.60
@@ -79,7 +79,6 @@ class Settings(BaseSettings):
 
     # --- Pipeline frequency / burst velocity (F2) ---
     PIPELINE_FREQUENCY_HOURS: int = 4
-    BURST_VELOCITY_WINDOW_HOURS: int = 2
     BURST_VELOCITY_ALERT_RATIO: float = 3.0
     SIGNAL_EXTRACTION_STALENESS_HOURS: int = 24
     CONVERGENCE_INDEPENDENCE_THRESHOLD: float = 0.30
@@ -106,19 +105,17 @@ class Settings(BaseSettings):
     # TRADIER_API_KEY intentionally deferred. Options data integration planned for later phase.
 
     # --- X/Twitter automated posting ---
-    # Optional: bot integration (not included in template)
     TWITTER_API_KEY: str = ""
     TWITTER_API_SECRET: str = ""
     TWITTER_ACCESS_TOKEN: str = ""
     TWITTER_ACCESS_TOKEN_SECRET: str = ""
-    TWITTER_ENABLED: bool = False  # Optional: bot integration (not included in template)
+    TWITTER_ENABLED: bool = False
     TWITTER_DAILY_BUDGET: int = 12
 
     # --- Typefully (posts to X without X API credits) ---
-    # Optional: bot integration (not included in template)
     TYPEFULLY_API_KEY: str = ""
     TYPEFULLY_SOCIAL_SET_ID: str = ""
-    TYPEFULLY_ENABLED: bool = False  # Optional: bot integration (not included in template)
+    TYPEFULLY_ENABLED: bool = False
     TYPEFULLY_DAILY_BUDGET: int = 1
     TYPEFULLY_MONTHLY_BUDGET: int = 15
 

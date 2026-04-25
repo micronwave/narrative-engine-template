@@ -79,7 +79,7 @@ result = compute_lifecycle_stage(
 T("T3: Revival allowed immediately (cycles=0)", result == "Growing", f"got {result}")
 
 S("Fix 1: Stage hysteresis — Mature→Declining thresholds")
-# velocity at 0.015 — was below old threshold 0.02, but above new 0.01
+# velocity at 0.015 — below the old 0.02 threshold, but above the recalibrated cutoff
 result_no_decline = compute_lifecycle_stage(
     current_stage="Mature", document_count=20, velocity_windowed=0.015,
     entropy=2.0, consecutive_declining_cycles=0, days_since_creation=30,

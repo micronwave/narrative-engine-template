@@ -13,6 +13,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def format_cycle_slot(now: datetime, cycle_hours: int) -> str:
+    """Return the UTC cycle-slot key used for centroid history snapshots."""
+    freq = max(cycle_hours, 1)
+    now_utc = now.astimezone(timezone.utc)
+    slot_hour = (now_utc.hour // freq) * freq
+    return now_utc.strftime(f"%Y-%m-%dT{slot_hour:02d}")
+
 # ---------------------------------------------------------------------------
 # Sentiment Lexicons (financially-relevant)
 # ---------------------------------------------------------------------------
@@ -141,9 +149,10 @@ def compute_velocity_windowed(
     window_days: int,
 ) -> float:
     """
-    Average of daily velocities over window_days.
-    centroid_history is ordered most-recent first.
-    Returns 0.0 if fewer than 2 entries — expected for new narratives.
+    Average of cycle-slot velocities over window_days.
+    centroid_history is ordered most-recent first and deduplicated by the
+    repository layer to one snapshot per cycle slot.
+    Returns 0.0 if fewer than 2 entries.
     """
     if len(centroid_history) < 2:
         return 0.0
@@ -354,12 +363,12 @@ def compute_lifecycle_stage(
 
     Rules applied in order:
     1. Revival: Declining/Dormant with velocity > 0.10 → Growing
-    2. Emerging → Growing: (doc_count >= 8 AND velocity > 0.05)
+    2. Emerging → Growing: (doc_count >= 8 AND velocity > 0.02)
        OR age-based fallback (doc_count >= 10 AND age >= 2 days)
     3. Growing → Mature: (days >= 5 AND entropy >= 1.5 AND doc_count >= 15)
        OR volume-based fallback (doc_count >= 50 AND age >= 7 days)
     4. Mature → Declining: consecutive_declining_cycles >= 30
-       OR (consecutive_declining_cycles >= 18 AND velocity < 0.01)
+       OR (consecutive_declining_cycles >= 18 AND velocity < 0.008)
     5. Declining → Dormant: consecutive_declining_cycles >= 42 AND velocity < 0.01
 
     Hysteresis: transitions (except revival) require >= 3 cycles in current stage.
@@ -369,9 +378,12 @@ def compute_lifecycle_stage(
     if current_stage in ("Declining", "Dormant") and velocity_windowed > 0.10:
         return "Growing"
 
+    growing_velocity_threshold = 0.02
+    declining_velocity_threshold = 0.008
+
     # Compute proposed stage from rules
     if current_stage == "Emerging":
-        if ((document_count >= 8 and velocity_windowed > 0.05)
+        if ((document_count >= 8 and velocity_windowed > growing_velocity_threshold)
                 or (document_count >= 10 and days_since_creation >= 2)):
             proposed = "Growing"
         else:
@@ -390,7 +402,7 @@ def compute_lifecycle_stage(
     elif current_stage == "Mature":
         if consecutive_declining_cycles >= 30:
             proposed = "Declining"
-        elif consecutive_declining_cycles >= 18 and velocity_windowed < 0.01:
+        elif consecutive_declining_cycles >= 18 and velocity_windowed < declining_velocity_threshold:
             proposed = "Declining"
         else:
             proposed = "Mature"
@@ -439,7 +451,6 @@ def compute_inflow_velocity(
 
 def compute_burst_velocity(
     recent_doc_count: int,
-    window_hours: int,
     baseline_docs_per_window: float,
     alert_ratio: float = 3.0,
 ) -> dict:

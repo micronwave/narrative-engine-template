@@ -36,6 +36,7 @@ from signals import (
     compute_polarization,
     compute_velocity,
     compute_velocity_windowed,
+    format_cycle_slot,
     get_narrative_age_days,
     validate_signal_fields,
 )
@@ -151,44 +152,100 @@ def _backfill_centroids(
     vector_store: "FaissVectorStore",
     emb_dim: int,
     prefix: str = "",
-) -> int:
+    target_narrative_ids: list[str] | None = None,
+) -> dict[str, object]:
     """Load missing centroid vectors from centroid_history into VectorStore.
 
-    Returns the number of vectors backfilled.
+    Returns a summary dict with counts and per-category IDs.
     """
-    existing_ids = set(vector_store.get_all_ids())
-    active_narratives = repository.get_all_active_narratives()
-    missing_ids = [
-        n["narrative_id"] for n in active_narratives
-        if n["narrative_id"] not in existing_ids
-    ]
+    if target_narrative_ids is None:
+        active_narratives = repository.get_all_active_narratives()
+        target_narrative_ids = [n["narrative_id"] for n in active_narratives]
+        existing_ids = set(vector_store.get_all_ids())
+        missing_ids = [
+            n["narrative_id"] for n in active_narratives
+            if n["narrative_id"] not in existing_ids
+        ]
+    else:
+        missing_ids = [
+            narrative_id
+            for narrative_id in target_narrative_ids
+            if vector_store.get_vector(narrative_id) is None
+        ]
+    summary: dict[str, object] = {
+        "requested": len(target_narrative_ids),
+        "missing": len(missing_ids),
+        "recovered": 0,
+        "missing_history": [],
+        "corrupt_blob": [],
+        "dim_mismatch": [],
+        "failed_recovery": [],
+    }
     if not missing_ids:
-        return 0
+        return summary
     blob_map = repository.get_latest_centroids_batch(missing_ids)
+    missing_history: list[str] = []
+    corrupt_blob: list[str] = []
+    dim_mismatch: list[str] = []
+    failed_recovery: list[str] = []
     backfilled = 0
     for nid, blob in blob_map.items():
         try:
             vec = np.frombuffer(blob, dtype=np.float32).copy()
         except ValueError:
-            logger.warning(
-                "%sCentroid blob for %s is not valid float32 — skipped",
-                prefix, nid,
-            )
+            corrupt_blob.append(nid)
             continue
         if vec.shape[0] == emb_dim:
-            vector_store.add(vec.reshape(1, -1), [nid])
-            backfilled += 1
+            try:
+                vector_store.add(vec.reshape(1, -1), [nid])
+                backfilled += 1
+            except Exception:
+                failed_recovery.append(nid)
         else:
+            dim_mismatch.append(nid)
+
+    if missing_ids:
+        missing_history = [nid for nid in missing_ids if nid not in blob_map]
+
+    summary.update({
+        "recovered": backfilled,
+        "missing_history": missing_history,
+        "corrupt_blob": corrupt_blob,
+        "dim_mismatch": dim_mismatch,
+        "failed_recovery": failed_recovery,
+    })
+
+    if target_narrative_ids is None:
+        if corrupt_blob or dim_mismatch or failed_recovery:
             logger.warning(
-                "%sCentroid dim mismatch for %s: got %d, expected %d — skipped",
-                prefix, nid, vec.shape[0], emb_dim,
+                "%sCentroid backfill summary: requested=%d missing=%d recovered=%d "
+                "missing_history=%d corrupt_blob=%d dim_mismatch=%d failed_recovery=%d",
+                prefix,
+                summary["requested"],
+                summary["missing"],
+                summary["recovered"],
+                len(missing_history),
+                len(corrupt_blob),
+                len(dim_mismatch),
+                len(failed_recovery),
             )
-    if backfilled:
-        logger.info(
-            "%sBackfilled %d/%d missing centroid vectors from centroid_history",
-            prefix, backfilled, len(missing_ids),
-        )
-    return backfilled
+        elif missing_history:
+            logger.debug(
+                "%sCentroid backfill summary: requested=%d missing=%d recovered=%d "
+                "missing_history=%d",
+                prefix,
+                summary["requested"],
+                summary["missing"],
+                summary["recovered"],
+                len(missing_history),
+            )
+        elif backfilled:
+            logger.info(
+                "%sBackfilled %d/%d missing centroid vectors from centroid_history",
+                prefix, backfilled, len(missing_ids),
+            )
+
+    return summary
 
 
 def _log_step(
@@ -289,6 +346,7 @@ def run() -> None:
     cycle_start = time.monotonic()
     today = datetime.now(timezone.utc).date().isoformat()
     now_iso = datetime.now(timezone.utc).isoformat()
+    cycle_slot = format_cycle_slot(datetime.now(timezone.utc), settings.PIPELINE_FREQUENCY_HOURS)
 
     # Shared state populated by steps and consumed by later steps
     surviving_docs: list[RawDocument] = []
@@ -646,7 +704,7 @@ def run() -> None:
                                 new_vec = new_vec / norm
                             vector_store.update(narrative_id, new_vec)
                             repository.insert_centroid_history(
-                                narrative_id, today, new_vec.tobytes()
+                                narrative_id, cycle_slot, new_vec.tobytes()
                             )
 
                         repository.record_narrative_assignment(narrative_id, today)
@@ -1000,7 +1058,6 @@ def run() -> None:
                     baseline_per_cycle = max(doc_count / (7.0 * cycles_per_day), 1.0)
                 burst = compute_burst_velocity(
                     recent_doc_count=new_assignment_count,
-                    window_hours=settings.PIPELINE_FREQUENCY_HOURS,
                     baseline_docs_per_window=baseline_per_cycle,
                     alert_ratio=settings.BURST_VELOCITY_ALERT_RATIO,
                 )
@@ -1048,7 +1105,23 @@ def run() -> None:
             for n in active_narratives:
                 repository.update_narrative(n["narrative_id"], {"centrality": 0.0})
         else:
-            graph = build_narrative_graph(active_narratives, vector_store)
+            # Re-run centroid backfill immediately before graph construction so
+            # narratives that lost their vector store entry after startup are
+            # restored before centrality is computed.
+            backfill_summary = _backfill_centroids(
+                repository,
+                vector_store,
+                emb_dim,
+                target_narrative_ids=[n["narrative_id"] for n in active_narratives],
+            )
+            unrecoverable_missing_ids = set(backfill_summary["corrupt_blob"]) | set(
+                backfill_summary["dim_mismatch"]
+            ) | set(backfill_summary["failed_recovery"])
+            graph = build_narrative_graph(
+                active_narratives,
+                vector_store,
+                unrecoverable_missing_ids=unrecoverable_missing_ids,
+            )
             centrality_scores = compute_centrality(graph)
             catalyst_ids = set(flag_catalysts(centrality_scores))
 
@@ -1063,6 +1136,19 @@ def run() -> None:
                 "Step 11: centrality for %d narratives, %d catalysts",
                 len(active_narratives), len(catalyst_ids),
             )
+            if backfill_summary["missing"] or unrecoverable_missing_ids:
+                logger.info(
+                    "Step 11: centroid backfill summary — requested=%d missing=%d "
+                    "recovered=%d missing_history=%d corrupt_blob=%d dim_mismatch=%d "
+                    "failed_recovery=%d",
+                    backfill_summary["requested"],
+                    backfill_summary["missing"],
+                    backfill_summary["recovered"],
+                    len(backfill_summary["missing_history"]),
+                    len(backfill_summary["corrupt_blob"]),
+                    len(backfill_summary["dim_mismatch"]),
+                    len(backfill_summary["failed_recovery"]),
+                )
 
         step_duration = (time.monotonic() - step_start) * 1000
         _log_step(repository, cycle_id, 11, "centrality", "OK", step_duration)

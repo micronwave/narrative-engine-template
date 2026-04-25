@@ -9,7 +9,7 @@ import numpy as np
 from embedding_model import EmbeddingModel
 from repository import Repository
 from settings import Settings
-from signals import get_narrative_age_days
+from signals import format_cycle_slot, get_narrative_age_days
 from vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ def run_clustering(
     """
     min_cluster_size = getattr(settings, 'HDBSCAN_MIN_CLUSTER_SIZE', _MIN_CLUSTER_SIZE)
     min_samples = getattr(settings, 'HDBSCAN_MIN_SAMPLES', _MIN_SAMPLES)
+    cycle_slot = format_cycle_slot(datetime.now(timezone.utc), settings.PIPELINE_FREQUENCY_HOURS)
 
     candidates = repository.get_candidate_buffer(status="pending")
 
@@ -267,7 +268,7 @@ def run_clustering(
 
         # Store centroid snapshot (blob = raw float32 bytes, same convention as
         # embedding_blob in candidate_buffer).
-        repository.insert_centroid_history(narrative_id, today, centroid.tobytes())
+        repository.insert_centroid_history(narrative_id, cycle_slot, centroid.tobytes())
 
         # Record per-doc assignments, evidence, and update candidate statuses.
         for doc in member_docs:
