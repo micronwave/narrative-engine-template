@@ -79,6 +79,7 @@ class MutationDetector:
             "sentiment_mean": narrative.get("sentiment_mean"),
             "sentiment_variance": narrative.get("sentiment_variance"),
             "source_count": narrative.get("source_count"),
+            "weighted_source_score": narrative.get("weighted_source_score"),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 

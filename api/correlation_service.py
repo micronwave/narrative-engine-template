@@ -131,7 +131,8 @@ SNAPSHOT_METRICS = [
     "velocity", "ns_score", "burst_ratio", "cohesion", "entropy",
     "polarization", "sentiment_mean", "sentiment_variance",
     "doc_count", "source_count", "intent_weight", "cross_source_score",
-    "centrality", "velocity_windowed", "public_interest",
+    "weighted_source_score", "centrality", "velocity_windowed",
+    "public_interest",
 ]
 
 

@@ -1223,6 +1223,7 @@ class SqliteRepository(Repository):
                 ("source_count", "INTEGER DEFAULT NULL"),
                 ("intent_weight", "REAL DEFAULT NULL"),
                 ("cross_source_score", "REAL DEFAULT NULL"),
+                ("weighted_source_score", "REAL DEFAULT NULL"),
                 ("centrality", "REAL DEFAULT NULL"),
                 ("velocity_windowed", "REAL DEFAULT NULL"),
                 ("public_interest", "REAL DEFAULT NULL"),
@@ -2872,7 +2873,8 @@ class SqliteRepository(Repository):
                        ns.entropy, ns.cohesion, ns.polarization, ns.doc_count,
                        ns.lifecycle_stage, ns.burst_ratio,
                        ns.sentiment_mean, ns.sentiment_variance, ns.source_count,
-                       ns.intent_weight, ns.cross_source_score, ns.centrality,
+                       ns.intent_weight, ns.cross_source_score, ns.weighted_source_score,
+                       ns.centrality,
                        ns.velocity_windowed, ns.public_interest
                 FROM narrative_snapshots ns
                 INNER JOIN narratives n ON ns.narrative_id = n.narrative_id
