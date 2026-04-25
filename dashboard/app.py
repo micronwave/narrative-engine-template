@@ -4,7 +4,7 @@ Run from project root: python dashboard/app.py
 """
 import json
 import os
-import pickle
+
 import re
 import secrets
 import sys
@@ -61,20 +61,13 @@ def csrf_protect(f):
 
 # ── Safe pickle loader ────────────────────────────────────────────────────────
 
-class _RestrictedUnpickler(pickle.Unpickler):
-    """Only allow basic Python types to prevent arbitrary code execution."""
-    _ALLOWED = {"builtins": {"dict", "list", "set", "tuple", "str", "int", "float", "bool"}}
+from safe_pickle import safe_load as _safe_load
 
-    def find_class(self, module, name):
-        allowed_names = self._ALLOWED.get(module)
-        if allowed_names and name in allowed_names:
-            return getattr(__import__(module), name)
-        raise pickle.UnpicklingError(f"Forbidden class: {module}.{name}")
+_DASHBOARD_PICKLE_ALLOWED = {"builtins": {"dict", "list", "set", "tuple", "str", "int", "float", "bool"}}
 
 
 def safe_pickle_load(path):
-    with open(path, "rb") as f:
-        return _RestrictedUnpickler(f).load()
+    return _safe_load(str(path), allowed=_DASHBOARD_PICKLE_ALLOWED)
 
 
 # ── Ticker validation ─────────────────────────────────────────────────────────
@@ -132,9 +125,6 @@ _SETTINGS_SECRET_KEYS = {
     "ANTHROPIC_API_KEY", "FINNHUB_API_KEY", "COINGECKO_API_KEY",
     "TWELVE_DATA_API_KEY", "REDDIT_CLIENT_SECRET", "JWT_SECRET_KEY",
     "MARKETAUX_API_KEY", "NEWSDATA_API_KEY",
-    "TWITTER_API_KEY", "TWITTER_API_SECRET",
-    "TWITTER_ACCESS_TOKEN", "TWITTER_ACCESS_TOKEN_SECRET",
-    "TYPEFULLY_API_KEY",
 }
 
 
@@ -266,13 +256,11 @@ def settings_view():
         feeds = []
 
     # Asset library stats
-    asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.json"
+    asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.pkl"
     asset_stats = {"exists": False, "count": 0}
     if asset_lib_path.exists():
         try:
-            import json as _json
-            with open(asset_lib_path, "r", encoding="utf-8") as _f:
-                lib = _json.load(_f)
+            lib = safe_pickle_load(asset_lib_path)
             asset_stats = {
                 "exists": True,
                 "count": len(lib),
@@ -471,12 +459,10 @@ def api_stocks():
         from settings import settings as _settings
 
         # Load tickers from asset library pkl (same pattern as /settings page)
-        asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.json"
+        asset_lib_path = Path(__file__).parent.parent / "data" / "asset_library.pkl"
         tickers: list[str] = []
         if asset_lib_path.exists():
-            import json as _json
-            with open(asset_lib_path, "r", encoding="utf-8") as _f:
-                lib = _json.load(_f)
+            lib = safe_pickle_load(asset_lib_path)
             tickers = [k for k in lib if not k.startswith("TOPIC:")]
 
         if not tickers:
@@ -600,6 +586,8 @@ def list_chat_sessions():
 @app.route("/api/chat/session/<session_id>")
 def get_chat_session(session_id):
     """Gets session with messages."""
+    if len(session_id) > 50:
+        return jsonify({"error": "Invalid session ID"}), 422
     manager, _ = _get_chat_manager()
     if manager is None:
         return jsonify({"error": "database not found"}), 503
@@ -613,6 +601,8 @@ def get_chat_session(session_id):
 @csrf_protect
 def send_chat_message(session_id):
     """Sends message and gets Haiku response."""
+    if len(session_id) > 50:
+        return jsonify({"error": "Invalid session ID"}), 422
     manager, _ = _get_chat_manager()
     if manager is None:
         return jsonify({"error": "database not found"}), 503
@@ -638,6 +628,8 @@ ALLOWED_TEMPLATE_KWARGS = {"ticker", "narrative_id", "timeframe"}
 @csrf_protect
 def apply_chat_template(session_id):
     """Applies a named template as the next message."""
+    if len(session_id) > 50:
+        return jsonify({"error": "Invalid session ID"}), 422
     manager, _ = _get_chat_manager()
     if manager is None:
         return jsonify({"error": "database not found"}), 503
@@ -658,6 +650,8 @@ def apply_chat_template(session_id):
 @csrf_protect
 def delete_chat_session(session_id):
     """Deletes session and all its messages."""
+    if len(session_id) > 50:
+        return jsonify({"error": "Invalid session ID"}), 422
     _, repo = _get_chat_manager()
     if repo is None:
         return jsonify({"error": "database not found"}), 503

@@ -104,21 +104,6 @@ class Settings(BaseSettings):
 
     # TRADIER_API_KEY intentionally deferred. Options data integration planned for later phase.
 
-    # --- X/Twitter automated posting ---
-    TWITTER_API_KEY: str = ""
-    TWITTER_API_SECRET: str = ""
-    TWITTER_ACCESS_TOKEN: str = ""
-    TWITTER_ACCESS_TOKEN_SECRET: str = ""
-    TWITTER_ENABLED: bool = False
-    TWITTER_DAILY_BUDGET: int = 12
-
-    # --- Typefully (posts to X without X API credits) ---
-    TYPEFULLY_API_KEY: str = ""
-    TYPEFULLY_SOCIAL_SET_ID: str = ""
-    TYPEFULLY_ENABLED: bool = False
-    TYPEFULLY_DAILY_BUDGET: int = 1
-    TYPEFULLY_MONTHLY_BUDGET: int = 15
-
     # --- Discord webhook (draft queue for manual posting) ---
     DISCORD_WEBHOOK_URL: str = ""
     DISCORD_WEBHOOK_ENABLED: bool = False

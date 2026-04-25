@@ -1,43 +1,8 @@
-# Narrative Intelligence Engine — Template
-
-> **This is a template repository.** Fork it, customize the data sources and asset universe, and build your own narrative intelligence system. This is work in progress, so stay up to date with new commits.
+# Narrative Intelligence Engine
 
 Detects and tracks large-scale financial narratives as they form, mutate, and decay across fragmented media — RSS feeds, SEC filings, Reddit, news APIs. Maps them to S&P 500 tickers, scores their momentum, flags coordinated campaigns, and serves it all through a web dashboard.
 
 Not a trading system. This watches the stories that move markets, not the markets themselves.
-
-<img width="1261" height="1191" alt="btc" src="https://github.com/user-attachments/assets/8ef67db0-6ba7-4143-aa22-7d72f93b90cf" />
-
-## Quick start
-
-```bash
-# 1. Clone and enter
-git clone https://github.com/YOUR_USERNAME/narrative-engine-template.git
-cd narrative-engine-template
-
-# 2. Python deps
-pip install -r requirements.txt
-pip install -r api/requirements.txt
-
-# 3. Frontend deps
-cd frontend && npm install && cd ..
-
-# 4. Environment
-cp .env.example .env
-# Set ANTHROPIC_API_KEY at minimum. FINNHUB_API_KEY for live prices.
-
-# 5. Build the asset library (one-time, ~15-30 min)
-#    Downloads S&P 500 10-K summaries from SEC EDGAR and generates embeddings.
-python build_asset_library.py
-
-# 6. Run the pipeline
-python pipeline.py
-
-# 7. Start the services
-uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload   # API
-cd frontend && npm run dev                                      # Frontend (port 3000)
-python dashboard/app.py                                         # Ops dashboard (port 5000)
-```
 
 ## How it works
 
@@ -69,55 +34,55 @@ RSS / SEC EDGAR / Reddit / MarketAux / NewsData
 
 Each step is non-fatal — if one stage throws, it logs the error and the pipeline keeps going.
 
-## Signal effectiveness
-
-The system tracks 15 numeric signals per narrative per cycle. Not all signals are equally useful. Early validation across 17 narrative/ticker pairs shows a clear hierarchy:
-
-**Tier 1 — strongest predictors of next-day price movement:**
-
-| Signal | Strength | Direction |
-|--------|----------|-----------|
-| Burst ratio | 0.415 | Mixed — predicts volatility, not direction |
-| Centrality | 0.401 | Negative — hub narratives signal crowded trades |
-| Document count | 0.396 | Positive — more coverage, price rises |
-| Windowed velocity | 0.375 | Positive — recency-weighted acceleration |
-
-**Key findings:**
-- **Volume signals dominate.** Narrative attention (how much coverage, how fast it's growing, whether it's spiking) is more predictive than sentiment, cohesion, or any other signal class.
-- **Sentiment is weak.** Sentiment mean (0.242) is the *least* predictive signal. Sentiment variance (0.316) has some value as a volatility indicator but regresses with more data.
-- **Centrality is contrarian.** When one narrative connects everything in the graph, it means the market has already organized around it. High centrality → consensus → already priced in.
-- **The composite score (Ns) underperforms its own inputs.** The weighted aggregate (0.317) is less predictive than burst ratio, doc count, or velocity individually — the weighting formula dilutes signal from the strong components.
-- **Cross-source agreement is contrarian.** When many independent sources agree on a narrative (high cross-source score), prices tend to fall the next day. Consistent with crowded-trade dynamics.
-
-These results are directional (17 pairs, 2-16 observations each), not statistically robust yet. The validation suite in the codebase (`/api/correlations/`) lets you run your own analysis as data accumulates.
-
-## What makes this different
-
-Most news-as-signal systems work at the **entity level** — count articles about $NVDA, score their sentiment, trade on that. This system works at the **narrative level**: it clusters articles into stories first, tracks those stories as units, then maps them to assets.
-
-The difference matters because:
-
-1. **Narratives capture thematic shifts before they localize to tickers.** "Semiconductor supply chain stress" affects $NVDA, $TSM, $INTC, and $ASML simultaneously. Entity-level systems see four separate signals. This system sees one narrative with four asset mappings — and detects it earlier because the cluster forms before any single ticker accumulates enough coverage to trigger an alert.
-
-2. **The graph layer adds structural signal.** The system builds a network where narratives are nodes and semantic similarity creates edges. Betweenness centrality on that graph — which narrative sits at the crossroads of information flow — is a signal type that entity-level systems can't produce. It turned out to be the strongest directional predictor.
-
-3. **Convergence detection finds independent confirmation.** When two narratives form independently (low centroid similarity) but both map to the same ticker, that's convergence — the strongest signal class in the system. Two separate stories pointing the same direction on the same asset, from different source clusters, is more informative than either story alone.
-
-4. **Volume over sentiment.** The academic literature supports this (Fang & Peress 2009, Barber & Odean 2008, Da et al. 2011): the *amount* of coverage predicts price movement more reliably than the *tone* of coverage. This system is built around that finding — burst detection, velocity tracking, source counting, and escalation monitoring are all volume-based signals.
-
-Commercial platforms in this space (RavenPack, MarketPsych/LSEG, Predata, Bloomberg Event-Driven Feeds) sell entity-level news analytics to institutional desks. The narrative-first architecture and graph-topology signals are less explored territory.
-
 ## Stack
 
 **Backend:** Python 3.12, FastAPI (66 endpoints), SQLite, FAISS, HDBSCAN, sentence-transformers, Claude API (Haiku + Sonnet)
 
-**Frontend:** Next.js 14 (App Router), TypeScript, Tailwind. Dark terminal aesthetic — no component library, custom design system with ~65 CSS variables.
+**Frontend:** Next.js 14 (App Router), TypeScript, Tailwind. Dark terminal aesthetic — no component library, custom design system with ~65 CSS variables. Palantir Blueprint color palette.
 
 **Ops:** Flask dashboard on port 5000 for pipeline monitoring.
 
 **Price data:** Finnhub (primary), TwelveData and CoinGecko available as secondary adapters behind a circuit breaker. WebSocket relay for real-time ticks.
 
-## Frontend routes
+## Setup
+
+```bash
+# 1. Python deps
+pip install -r requirements.txt
+pip install -r api/requirements.txt
+
+# 2. Frontend deps
+cd frontend && npm install && cd ..
+
+# 3. Environment
+cp .env.example .env
+# Set ANTHROPIC_API_KEY at minimum. FINNHUB_API_KEY for live prices.
+
+# 4. Build the asset library (one-time, ~15-30 min)
+#    Downloads S&P 500 10-K summaries from SEC EDGAR and generates embeddings.
+#    Pipeline won't run without this.
+python build_asset_library.py
+```
+
+## Running
+
+```bash
+# Pipeline (single cycle)
+python pipeline.py
+
+# API server
+uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Frontend (proxies /api/* to port 8000)
+cd frontend && npm run dev
+
+# Ops dashboard
+python dashboard/app.py
+```
+
+On Windows, `run_pipeline.bat` is the Task Scheduler entry point — set it to run every 4 hours with wake-to-run enabled. Logs go to `logs/`.
+
+## What the frontend shows
 
 | Route | What's there |
 |-------|-------------|
@@ -131,11 +96,21 @@ Commercial platforms in this space (RavenPack, MarketPsych/LSEG, Predata, Bloomb
 | `/brief/[ticker]` | Pre-earnings intelligence brief with price history and correlation links |
 | `/correlation` | Velocity-price correlation explorer (Pearson r, lead-time sweep) |
 | `/portfolio` | Portfolio holdings with narrative exposure tracking |
-| `/alerts` | Alert management with real-time SSE streaming |
-| `/dashboard` | Customizable widget grid (10 widget types) |
-| `/sentiment` | Social sentiment analysis across sources |
-| `/social` | Social mentions and trending narratives |
 | `/analytics` | Aggregate analytics — leaderboards, timelines, heatmaps |
+
+## Narrative lifecycle
+
+Narratives move through stages automatically based on their metrics:
+
+- **Emerging** — fewer than 8 documents, just appeared
+- **Growing** — 8+ docs, velocity above 0.05
+- **Mature** — 5+ days old, high entropy, 15+ documents
+- **Declining** — 3 consecutive declining days or velocity drops below 0.02
+- **Dormant** — 7+ declining days, velocity under 0.01
+
+They can revive. If a dormant narrative's velocity spikes past 0.10, it jumps back to Growing.
+
+Each narrative also gets 1-3 topic tags from the LLM: `regulatory`, `earnings`, `geopolitical`, `macro`, `esg`, `m&a`, `crypto`.
 
 ## Key modules
 
@@ -155,32 +130,16 @@ Commercial platforms in this space (RavenPack, MarketPsych/LSEG, Predata, Bloomb
 
 Extension modules (notifications, portfolio, watchlist, chat, export) are manager-pattern classes instantiated in `api/main.py`.
 
-## Customization
-
-See [CUSTOMIZATION.md](CUSTOMIZATION.md) for a detailed guide. Key extension points:
-
-- **Data sources** — add RSS feeds in `ingester.py`, enable API ingesters in `.env`
-- **Asset universe** — modify tickers in `build_asset_library.py` and `api/sector_map.py`
-- **Tracked securities** — edit the example stub data in `api/main.py`
-- **LLM prompts** — adjust labeling and analysis prompts in `llm_client.py`
-- **Frontend theme** — modify CSS variables in `frontend/src/app/globals.css`
-- **Social posting** — pipeline has a hook point for adding a bot module (see `pipeline.py`)
-
-## Scaling
-
-Three swap points are marked with `# TODO SCALE` in the code:
-
-- **Storage:** `SqliteRepository` → Postgres
-- **Vectors:** `FaissVectorStore` → pgvector or Pinecone
-- **Graph:** NetworkX → distributed graph engine (needed past ~10k narratives)
-
 ## Tests
 
-Backend tests use a minimal custom runner (no pytest). Frontend tests use Jest + Testing Library. See `tests/README.md` for details.
+Backend tests use a minimal custom runner (no pytest). Frontend tests use Jest + Testing Library.
 
 ```bash
-# Backend — always use -X utf8 on Windows
-python -X utf8 tests/test_c1_api.py
+# Backend — run from project root, always use -X utf8 on Windows
+python -X utf8 tests/test_c2_api.py
+python -X utf8 tests/test_d1_api.py
+# ... 46 test files total across C (customer), D (data), F (feature),
+#     v3 (signal redesign), signal_p (pipeline), and audit suites
 
 # Frontend
 cd frontend && npx jest --watchAll=false
@@ -193,16 +152,27 @@ Everything loads from `.env` via Pydantic v2 (`settings.py`). See `.env.example`
 
 Only `ANTHROPIC_API_KEY` is required. Everything else has sensible defaults.
 
+Notable optional keys:
+- `FINNHUB_API_KEY` — live stock prices
+- `MARKETAUX_API_KEY`, `NEWSDATA_API_KEY` — additional news sources
+- `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` — Reddit ingestion
+- `ENABLE_TWELVE_DATA`, `ENABLE_COINGECKO` — secondary price adapters
+- `SONNET_DAILY_TOKEN_BUDGET` (default 200k) — caps daily Sonnet spend
+
+## Scaling
+
+The architecture is designed for single-machine use right now. Three swap points are marked with `# TODO SCALE` in the code:
+
+- **Storage:** `SqliteRepository` → Postgres
+- **Vectors:** `FaissVectorStore` → pgvector or Pinecone
+- **Graph:** NetworkX → distributed graph engine (needed past ~10k narratives)
+
 ## Compliance
 
 - robots.txt is checked before every HTTP fetch
 - Every LLM call is logged to `llm_audit_log` with token counts and cost
 - Source attribution (URL, domain, publish date) is mandatory on all ingested documents
 - Output carries a hardcoded disclaimer: *INTELLIGENCE ONLY — NOT FINANCIAL ADVICE*
-
-## License
-
-[MIT](LICENSE)
 
 ## Disclaimer
 

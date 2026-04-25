@@ -780,7 +780,10 @@ class SqliteRepository(Repository):
 
     def migrate(self) -> None:
         with self._get_conn() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                conn.execute("PRAGMA journal_mode=OFF")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS narratives (

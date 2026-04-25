@@ -150,6 +150,10 @@ Manager-pattern classes instantiated in `api/main.py`, backed by `SqliteReposito
 - `source_tiers.py` — 5-tier domain authority classification (1=wire services, 5=social/retail); escalation tracking per narrative
 - `validate_signal.py` — diagnostic: plots narrative velocity vs ticker price, outputs PNG + correlation summary
 
+### Twitter Bot (`twitter_bot.py`)
+
+Outbound posting is retired from pipeline runtime. `twitter_bot.py` is retained for legacy helpers/tests and is no longer called automatically by `pipeline.py`.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Only `ANTHROPIC_API_KEY` is required. Settings validated by Pydantic v2 (`settings.py`). New fields use plain Python defaults — no `Field()` wrapper.
@@ -178,6 +182,8 @@ Frontend tests use Jest + @testing-library/react. Use `data-testid` for selector
 **Test assertions that check CSS class names:** Several tests match on `bullish`, `bearish`, `alert`, `critical`, `accent-muted`, `accent-text`, `purple`, `line-through`. Changing these Tailwind utility names will break tests.
 
 Backend: ~45 test files in `tests/`. Frontend: 13 Jest suites in `frontend/src/__tests__/`.
+
+Build results go in `BUILD_LOG.md`. Frontend build log in `frontend_build_log`.
 
 ## Compliance
 

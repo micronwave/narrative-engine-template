@@ -1940,7 +1940,20 @@ def run() -> None:
         _log_step(repository, cycle_id, 197, "check_notifications", "ERROR", step_duration, str(exc))
         # Non-fatal: continue to cleanup
 
-    # Hook: add your own post-pipeline dispatch here (e.g., Twitter bot, Slack, etc.)
+    # ------------------------------------------------------------------ #
+    # Step 19.8: Outbound posting retired (Phase 3 revamp)                #
+    # ------------------------------------------------------------------ #
+    step_start = time.monotonic()
+    step_duration = (time.monotonic() - step_start) * 1000
+    _log_step(
+        repository,
+        cycle_id,
+        198,
+        "outbound_posting_retired",
+        "OK",
+        step_duration,
+        "phase3_revamp:dispatch_removed",
+    )
 
     # ------------------------------------------------------------------ #
     # Step 20: Cleanup                                                    #
