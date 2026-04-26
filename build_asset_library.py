@@ -119,6 +119,8 @@ TICKERS: dict[str, str] = {
     "SHW": "Sherwin-Williams Company",
     "HCA": "HCA Healthcare Inc.",
     "TGT": "Target Corporation",
+    "NKE": "Nike Inc.",
+    "LULU": "Lululemon Athletica Inc.",
     "REGN": "Regeneron Pharmaceuticals Inc.",
     "FDX": "FedEx Corporation",
     "MATX": "Matson Inc.",

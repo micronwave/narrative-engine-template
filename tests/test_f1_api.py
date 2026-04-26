@@ -4,7 +4,7 @@ F1 — Lifecycle Stage Progression Tests
 Unit:
   F1-U1: compute_lifecycle_stage returns "Emerging" for brand-new narrative
   F1-U2: compute_lifecycle_stage returns "Growing" when doc_count >= 8 and velocity > 0.02
-  F1-U3: compute_lifecycle_stage returns "Mature" when days >= 5, entropy >= 1.5, docs >= 15
+  F1-U3: compute_lifecycle_stage returns "Mature" when days >= 5, entropy >= 1.2, docs >= 15
   F1-U4: compute_lifecycle_stage returns "Declining" when consecutive_declining >= 30 (or >= 18 with velocity < 0.008)
   F1-U5: compute_lifecycle_stage returns "Dormant" when declining >= 42 and velocity < 0.01
   F1-U6: Revival — Declining + velocity > 0.10 returns "Growing"
@@ -80,7 +80,7 @@ result3 = compute_lifecycle_stage(
 T("stays Emerging with low doc count", result3 == "Emerging", f"got {result3}")
 
 # ===========================================================================
-# F1-U3: Mature when days >= 5, entropy >= 1.5, docs >= 15
+# F1-U3: Mature when days >= 5, entropy >= 1.2, docs >= 15
 # ===========================================================================
 S("F1-U3: Growing → Mature")
 result = compute_lifecycle_stage(

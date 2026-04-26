@@ -87,8 +87,68 @@ _HEDGE_PATTERNS: list[re.Pattern] = [
     for term in HEDGE_VOCAB
 ]
 
-# Ticker regex: 1-5 uppercase letters at word boundaries.
+# Ticker regex: 1-5 uppercase letters, word boundaries.
+# Candidates are filtered by _KNOWN_TICKERS to prevent acronym false positives (NASA, CEO,
+# WHO) while allowing valid single-letter symbols (F, V, C, A, H, D, O).
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}\b")
+# Known tradeable symbols: S&P 500 constituents + major ADRs.
+# A whitelist beats a blacklist here — handles single-letter tickers and blocks acronyms.
+_KNOWN_TICKERS: frozenset[str] = frozenset({
+    # Mega-cap / broad tech
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "GOOG", "META", "TSLA",
+    "ADBE", "CRM", "CSCO", "TXN", "INTU", "ORCL", "NOW", "SNOW", "DDOG",
+    "OKTA", "ZS", "CRWD", "PANW", "FTNT", "NET", "MDB", "TEAM", "ZM",
+    "DOCU", "TWLO", "SAP", "ASML", "TSM", "AMAT", "LRCX", "KLAC",
+    "NTES", "BIDU",
+    # Consumer / retail / media
+    "WMT", "COST", "HD", "TGT", "MCD", "SBUX", "LOW", "TJX", "BKNG",
+    "MAR", "HLT", "DIS", "NFLX", "NKE", "LULU", "SNAP", "PINS", "MTCH", "TTD",
+    "ROKU", "SPOT", "EA", "TTWO", "RBLX", "UBER", "LYFT", "ABNB", "DASH",
+    # Consumer goods
+    "PG", "KO", "PEP", "MO", "PM",
+    # Financials
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "SCHW", "AXP", "V", "MA",
+    "PYPL", "SQ", "COIN", "CME", "ICE", "SPGI", "MSCI", "MCO", "USB", "PNC",
+    "TFC", "COF", "DFS", "SYF", "BK", "STT", "PRU", "MET", "AIG", "AFL",
+    "PFG", "TRV", "ALL", "CB", "FIS", "FISV", "GPN", "AON",
+    # Healthcare
+    "UNH", "LLY", "MRK", "ABBV", "JNJ", "PFE", "GILD", "AMGN", "BMY",
+    "MDT", "ABT", "TMO", "DHR", "ISRG", "SYK", "BSX", "BDX", "ELV",
+    "HUM", "CI", "CVS", "WBA", "CAH", "ABC", "WAT", "MTD", "PKI", "IDXX",
+    "IQV", "CRL", "ILMN", "BIIB", "VRTX", "ALNY", "MRNA", "BNTX", "HCA",
+    "REGN", "ZTS", "A",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "DVN", "FANG", "MRO", "APA",
+    "OVV", "CTRA", "PR", "VLO", "MPC", "PSX", "HAL", "BKR", "SU", "ENB",
+    # Industrials / defense / auto
+    "HON", "CAT", "DE", "EMR", "ITW", "RTX", "LMT", "GD", "NOC", "BA",
+    "HII", "LHX", "TDG", "LDOS", "SAIC", "GE", "ETN", "UPS", "FDX", "ACN",
+    "CHRW", "EXPD", "XPO", "JBHT", "KNX", "F", "GM",
+    # Materials / mining
+    "LIN", "APD", "ECL", "PPG", "SHW", "DOW", "VMC", "MLM", "NEM", "GOLD",
+    "AEM", "FNV", "WPM", "RGLD", "FCX", "NUE", "STLD",
+    # Shipping
+    "MATX", "ZIM", "DAC", "GOGL", "SBLK", "EGLE",
+    # Utilities
+    "SO", "DUK", "NEE", "AES", "ES", "ETR", "PPL", "XEL", "WEC", "CNP",
+    "NI", "OGE", "PNW", "IDA", "NWE", "AVA", "POR", "HE", "SRE", "PEG",
+    "AEE", "AEP", "EXC", "PCG", "ED", "D", "AWK",
+    # REITs
+    "SPG", "O", "AMT", "CCI", "SBAC", "DLR", "EQIX", "PSA", "EXR", "PLD",
+    "AVB", "EQR", "MAA", "CPT", "UDR", "ESS", "INVH", "AMH", "VTR", "WELL",
+    "OHI", "SBRA", "NHI", "HR", "DOC", "CTRE", "MPW", "LTC",
+    # International / ADRs
+    "NVO", "AZN", "GSK", "NOVN", "ROG", "SNY", "BAYRY", "RHHBY", "SIEGY",
+    "NSRGY", "RY", "TD", "BNS", "BMO", "CM", "CNI", "CP", "JD", "PDD",
+    "NIO", "XPEV", "LI", "BABA", "TCEHY",
+    # Travel / hospitality
+    "HLT", "H", "IHG", "CCL", "RCL", "NCLH", "DAL", "UAL", "AAL", "LUV",
+    "ALK", "CSX", "NSC", "UNP",
+    # Waste / water
+    "WM", "RSG",
+    # Misc
+    "AVGO", "COIN", "SHOP",
+})
 
 # POSITIVE/NEGATIVE word sets for O(1) lookup.
 _POS_SET = set(POSITIVE_WORDS)
@@ -166,21 +226,34 @@ def compute_velocity_windowed(
     return float(np.mean(velocities)) if velocities else 0.0
 
 
+def extract_known_tickers(text: str, min_length: int = 2) -> list[str]:
+    """Return sorted unique tickers from text that are in the known-ticker whitelist.
+
+    min_length=2 (default) excludes single-letter symbols (A, C, D, F, H, O, V) which
+    are indistinguishable from common English words in unstructured news text.
+    """
+    return sorted(
+        {t for t in _TICKER_RE.findall(text) if t in _KNOWN_TICKERS and len(t) >= min_length}
+    )
+
+
 def compute_entropy(
     documents: list[str],
     min_vocab_size: int,
+    include_single_letter_tickers: bool = False,
 ) -> float | None:
     """
     H = −Σ p(x) log p(x) over distribution of unique extracted entities.
-    Entities = ticker symbols ([A-Z]{1,5}) + fiscal/financial vocabulary terms.
+    Entities = known ticker symbols (whitelist-filtered) + fiscal/financial vocabulary terms.
     Returns None when unique entity count < min_vocab_size.
+    By default, excludes single-letter tickers to avoid sentence-leading noise.
     Uses natural log (np.log).
     """
     entity_counts: Counter = Counter()
 
+    ticker_min_length = 1 if include_single_letter_tickers else 2
     for doc in documents:
-        # Ticker symbols (uppercase letter sequences, word boundaries).
-        tickers = _TICKER_RE.findall(doc)
+        tickers = extract_known_tickers(doc, min_length=ticker_min_length)
         entity_counts.update(tickers)
 
         # Fiscal/financial vocabulary terms (case-insensitive).
@@ -365,8 +438,8 @@ def compute_lifecycle_stage(
     1. Revival: Declining/Dormant with velocity > 0.10 → Growing
     2. Emerging → Growing: (doc_count >= 8 AND velocity > 0.02)
        OR age-based fallback (doc_count >= 10 AND age >= 2 days)
-    3. Growing → Mature: (days >= 5 AND entropy >= 1.5 AND doc_count >= 15)
-       OR volume-based fallback (doc_count >= 50 AND age >= 7 days)
+    3. Growing → Mature: (days >= 5 AND entropy >= 1.2 AND doc_count >= 15)
+       OR volume-based fallback (doc_count >= 30 AND age >= 7 days)
     4. Mature → Declining: consecutive_declining_cycles >= 30
        OR (consecutive_declining_cycles >= 18 AND velocity < 0.008)
     5. Declining → Dormant: consecutive_declining_cycles >= 42 AND velocity < 0.01
@@ -392,9 +465,9 @@ def compute_lifecycle_stage(
     elif current_stage == "Growing":
         if ((days_since_creation >= 5
                 and entropy is not None
-                and entropy >= 1.5
+                and entropy >= 1.2
                 and document_count >= 15)
-                or (document_count >= 50 and days_since_creation >= 7)):
+                or (document_count >= 30 and days_since_creation >= 7)):
             proposed = "Mature"
         else:
             proposed = "Growing"

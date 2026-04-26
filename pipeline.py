@@ -933,6 +933,11 @@ def run() -> None:
 
             entropy = compute_entropy(doc_texts, settings.ENTROPY_VOCAB_WINDOW) \
                 if doc_texts else None
+            if entropy is None and (narrative.get("stage") or "Emerging") in ("Growing", "Mature"):
+                logger.debug(
+                    "Narrative %s (stage=%s, docs=%d): entropy=None — insufficient financial vocabulary",
+                    narrative_id, narrative.get("stage"), narrative.get("document_count") or 0,
+                )
             intent_weight = compute_intent_weight(doc_texts) if doc_texts else 0.0
             cross_source_score = compute_cross_source_score(doc_domains, corpus_domain_count)
 
@@ -1359,6 +1364,7 @@ def run() -> None:
                     or not (narrative.get("description") or "").strip()
                 )
             )
+            label_persisted = False
             if needs_label:
                 # FIX(health_fix2): Per-narrative try/except — one failure must not
                 # abort labeling for all remaining narratives in the loop.  Prior to
@@ -1366,7 +1372,6 @@ def run() -> None:
                 # in a single narrative's labeling propagated to the outer step-14
                 # try/except, skipping every subsequent narrative.  This was the root
                 # cause of 64 zombie narratives (name IS NULL) accumulating over time.
-                label_persisted = False
                 try:
                     evidence = repository.get_document_evidence(narrative_id)
                     # Sanitize excerpts: strip control chars + format markers
@@ -1742,6 +1747,24 @@ def run() -> None:
                 topic_tags=narrative_topic_tags,
                 sector_map=SECTOR_MAP,
             ) if centroid_vec is not None else []
+
+            # Fallback: when embedding similarity misses, scan evidence text for explicit
+            # ticker mentions against the known-ticker whitelist.
+            if not linked_assets and evidence:
+                from signals import extract_known_tickers
+                evidence_text = " ".join(
+                    (e.get("excerpt") or "")[:200] for e in evidence[:10]
+                )
+                fallback_tickers = extract_known_tickers(evidence_text)
+                if fallback_tickers:
+                    linked_assets = [
+                        {"ticker": t, "asset_name": t, "similarity_score": 0.0, "source": "text_mention"}
+                        for t in fallback_tickers
+                    ]
+                    logger.info(
+                        "Narrative %s: text-based ticker fallback found: %s",
+                        narrative_id, fallback_tickers,
+                    )
 
             # Phase 6: Enrich linked_assets with directional impact scores
             if linked_assets:

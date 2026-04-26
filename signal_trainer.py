@@ -135,10 +135,19 @@ def build_training_dataset(repository) -> tuple[list[list[float]], list[int]]:
         if not peak_date_str:
             continue
 
-        # Extract tickers (skip TOPIC: entries)
+        # Extract tickers — skip TOPIC: entries and text-mention fallback assets.
+        # Fallback assets (source="text_mention", similarity_score=0.0) have no
+        # embedding confidence; including them in training pollutes labels.
         tickers = []
         for asset in linked_assets:
-            t = asset.get("ticker", "") if isinstance(asset, dict) else str(asset)
+            if isinstance(asset, dict):
+                if asset.get("source") == "text_mention":
+                    continue
+                if _safe_float(asset.get("similarity_score"), 0.0) <= 0.0:
+                    continue
+                t = asset.get("ticker", "")
+            else:
+                t = str(asset)
             if t and not t.startswith("TOPIC:"):
                 tickers.append(t)
 
