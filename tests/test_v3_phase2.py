@@ -10,7 +10,6 @@ V3 Phase 2 — Core Features Tests
   V3-TL-1: GET /api/narratives/{id}/timeline returns timeline
   V3-TL-2: Timeline entries have expected fields
   V3-TL-3: GET /api/narratives/{id}/compare returns comparison
-  V3-ALERT-C1: GET /api/alerts/count returns unread count
 """
 
 import sys
@@ -126,16 +125,6 @@ if has_narratives:
     cmp = resp.json()
     T("TL-3a: has differences list", isinstance(cmp.get("differences"), list))
     T("TL-3b: has narrative_name", "narrative_name" in cmp)
-
-
-# ===========================================================================
-# Alert Count (already tested in Phase 1, but verify after context wiring)
-# ===========================================================================
-S("V3-ALERT: Alert count (Phase 2 prep)")
-
-resp = client.get("/api/alerts/count")
-T("ALERT-C1: count → 200", resp.status_code == 200)
-T("ALERT-C1a: has unread int", isinstance(resp.json().get("unread"), int))
 
 
 # ===========================================================================

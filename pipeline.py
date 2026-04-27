@@ -25,7 +25,6 @@ from output import build_output_object, validate_output, write_outputs
 from repository import SqliteRepository
 from settings import settings
 from signals import (
-    _accept_fallback_ticker,
     compute_cohesion,
     compute_cross_source_score,
     compute_entropy,
@@ -37,7 +36,6 @@ from signals import (
     compute_polarization,
     compute_velocity,
     compute_velocity_windowed,
-    extract_known_tickers,
     format_cycle_slot,
     get_narrative_age_days,
     validate_signal_fields,
@@ -1750,24 +1748,23 @@ def run() -> None:
                 sector_map=SECTOR_MAP,
             ) if centroid_vec is not None else []
 
-            # Fallback: when embedding similarity misses, scan evidence text for strong
-            # explicit ticker mentions. Accept $TICKER, (TICKER) with optional whitespace,
-            # or a plain uppercase ticker seen in at least two distinct excerpts.
+            # Fallback: when embedding similarity misses, scan evidence text for explicit
+            # ticker mentions against the known-ticker whitelist.
             if not linked_assets and evidence:
-                evidence_excerpts = [
-                    (e.get("excerpt") or "")[:200]
-                    for e in evidence[:10]
-                ]
-                evidence_text = " ".join(evidence_excerpts)
-                fallback_tickers = [
-                    t for t in extract_known_tickers(evidence_text)
-                    if _accept_fallback_ticker(evidence_excerpts, t)
-                ]
+                from signals import extract_known_tickers
+                evidence_text = " ".join(
+                    (e.get("excerpt") or "")[:200] for e in evidence[:10]
+                )
+                fallback_tickers = extract_known_tickers(evidence_text)
                 if fallback_tickers:
                     linked_assets = [
                         {"ticker": t, "asset_name": t, "similarity_score": 0.0, "source": "text_mention"}
                         for t in fallback_tickers
                     ]
+                    logger.info(
+                        "Narrative %s: text-based ticker fallback found: %s",
+                        narrative_id, fallback_tickers,
+                    )
 
             # Phase 6: Enrich linked_assets with directional impact scores
             if linked_assets:
@@ -1946,24 +1943,6 @@ def run() -> None:
         step_duration = (time.monotonic() - step_start) * 1000
         logger.error("Step 19.5 (snapshot and mutations) failed: %s", exc, exc_info=True)
         _log_step(repository, cycle_id, 195, "snapshot_and_mutations", "ERROR", step_duration, str(exc))
-        # Non-fatal: continue to cleanup
-
-    # ------------------------------------------------------------------ #
-    # Step 19.7: Check Notification Rules                                #
-    # ------------------------------------------------------------------ #
-    step_start = time.monotonic()
-    try:
-        from notifications import NotificationManager
-        notif_manager = NotificationManager(repository)
-        triggered = notif_manager.check_rules()
-        step_duration = (time.monotonic() - step_start) * 1000
-        logger.info("Step 19.7: checked notification rules, triggered=%d", len(triggered))
-        _log_step(repository, cycle_id, 197, "check_notifications", "OK", step_duration,
-                  f"triggered={len(triggered)}")
-    except Exception as exc:
-        step_duration = (time.monotonic() - step_start) * 1000
-        logger.warning("Step 19.7 (check_notifications) failed: %s", exc)
-        _log_step(repository, cycle_id, 197, "check_notifications", "ERROR", step_duration, str(exc))
         # Non-fatal: continue to cleanup
 
     # ------------------------------------------------------------------ #

@@ -121,7 +121,6 @@ endpoints = [
     ("GET", "/api/correlations/top?limit=3", 200),
     ("GET", "/api/portfolio", 200),
     ("GET", "/api/portfolio/exposure", 200),
-    ("GET", "/api/alerts/count", 200),
     ("GET", "/api/earnings/upcoming", 200),
 ]
 

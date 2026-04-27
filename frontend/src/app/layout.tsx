@@ -2,8 +2,6 @@ import type { Metadata } from "next";
 import { IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
-import { AlertProvider } from "@/contexts/AlertContext";
-import { WatchlistProvider } from "@/contexts/WatchlistContext";
 import NavBar from "@/components/NavBar";
 import QueryProvider from "@/components/QueryProvider";
 
@@ -37,14 +35,10 @@ export default function RootLayout({
       <body className={`${ibmPlexSans.className} antialiased`}>
         <QueryProvider>
           <AuthProvider>
-            <AlertProvider>
-              <WatchlistProvider>
-                <NavBar />
-                <main className="min-h-screen md:ml-16 pb-20 md:pb-0">
-                  {children}
-                </main>
-              </WatchlistProvider>
-            </AlertProvider>
+            <NavBar />
+            <main className="min-h-screen md:ml-16 pb-20 md:pb-0">
+              {children}
+            </main>
           </AuthProvider>
         </QueryProvider>
       </body>

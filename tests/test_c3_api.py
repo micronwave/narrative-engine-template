@@ -1,7 +1,7 @@
 """
 C3 API test suite — Narrative Intelligence Platform, Phase C3.
 
-Tests: C3-U1 through C3-U4 (credits/use + SSE stream endpoint).
+Tests: C3-U1, C3-U3 through C3-U4 (credits/use + SSE stream endpoint).
 
 Uses the project's custom S/T runner + FastAPI TestClient (in-process).
 
@@ -96,20 +96,6 @@ S("C3-U1: monetization endpoints removed")
 T("POST /api/credits/use returns 404", client.post("/api/credits/use", headers=AUTH_HEADER).status_code == 404)
 T("GET /api/credits returns 404", client.get("/api/credits", headers=AUTH_HEADER).status_code == 404)
 T("GET /api/subscription returns 404", client.get("/api/subscription", headers=AUTH_HEADER).status_code == 404)
-
-# ===========================================================================
-# C3-U2: Retained social/sentiment endpoints are local-safe
-# ===========================================================================
-S("C3-U2: social/sentiment local-safe auth behavior")
-
-resp_market = client.get("/api/sentiment/market")
-T("market sentiment without token → 200", resp_market.status_code == 200, f"got {resp_market.status_code}")
-
-resp_trending = client.get("/api/social/trending")
-T("social trending without token → 200", resp_trending.status_code == 200, f"got {resp_trending.status_code}")
-
-resp_wrong = client.get("/api/sentiment/market", headers={"x-auth-token": "wrong-token"})
-T("bad token on optional auth endpoint → 403", resp_wrong.status_code == 403, f"got {resp_wrong.status_code}")
 
 # ===========================================================================
 # C3-U3: Export endpoint is local-safe

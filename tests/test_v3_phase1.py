@@ -5,9 +5,6 @@ Unit:
   V3-AUTH-1: get_current_user returns user_id="local" for no token (single-user mode)
   V3-AUTH-2: get_current_user returns user_id="local" for valid stub token
   V3-AUTH-3: get_current_user raises 403 for invalid token
-  V3-AUTH-4: Watchlist endpoints still work (user_id flows through)
-  V3-AUTH-5: Alert endpoints still work (user_id flows through)
-  V3-AUTH-6: CORS allows DELETE method
   V3-DET-1: GET /api/narratives/{id} includes sonnet_analysis field
   V3-DET-2: GET /api/narratives/{id} includes sentiment field
   V3-DET-3: GET /api/narratives/{id} includes coordination field
@@ -21,7 +18,6 @@ Unit:
   V3-COR-2: GET /api/narratives/{id}/correlations returns list
   V3-SENT-1: compute_sentiment_scores returns correct shape
   V3-SENT-2: compute_sentiment_scores handles empty input
-  V3-ALERT-1: GET /api/alerts/count returns unread count
 """
 
 import sys
@@ -66,10 +62,6 @@ client = TestClient(app)
 # ===========================================================================
 S("V3-AUTH: Auth dependency")
 
-# AUTH-1: No token → still works (single-user mode returns local)
-resp = client.get("/api/watchlist")
-T("AUTH-1: No token → watchlist returns 200", resp.status_code == 200, f"status={resp.status_code}")
-
 # AUTH-2: Valid stub token → works
 resp = client.get("/api/auth/me", headers={"x-auth-token": "stub-auth-token"})
 T("AUTH-2: Valid stub token → auth/me returns 200", resp.status_code == 200, f"status={resp.status_code}")
@@ -77,26 +69,6 @@ T("AUTH-2: Valid stub token → auth/me returns 200", resp.status_code == 200, f
 # AUTH-3: Invalid token → 403
 resp = client.get("/api/auth/me", headers={"x-auth-token": "bad-token"})
 T("AUTH-3: Invalid token → 403", resp.status_code == 403, f"status={resp.status_code}")
-
-# AUTH-4: Watchlist add works with auth
-resp = client.post("/api/watchlist/add", json={"item_type": "ticker", "item_id": "TEST_V3"})
-T("AUTH-4: Watchlist add → 200", resp.status_code == 200, f"status={resp.status_code}")
-
-# AUTH-5: Alert rules works with auth
-resp = client.get("/api/alerts/rules")
-T("AUTH-5: Alert rules → 200", resp.status_code == 200, f"status={resp.status_code}")
-
-# AUTH-6: CORS — check allow_methods includes DELETE
-from api.main import app as _app
-cors_middleware = None
-for m in _app.user_middleware:
-    if "CORSMiddleware" in str(m):
-        cors_middleware = m
-        break
-# Just check the endpoint works with DELETE
-resp = client.delete("/api/watchlist/remove/nonexistent-id")
-T("AUTH-6: DELETE method works", resp.status_code in (200, 404), f"status={resp.status_code}")
-
 
 # ===========================================================================
 # Narrative Detail Enrichment Tests
@@ -231,30 +203,6 @@ T("SENT-1f: has polarization_label", "polarization_label" in result)
 result_empty = compute_sentiment_scores([])
 T("SENT-2a: empty input returns count=0", result_empty.get("count") == 0)
 T("SENT-2b: empty input mean=0", result_empty.get("mean") == 0.0)
-
-
-# ===========================================================================
-# Alert Count Endpoint
-# ===========================================================================
-S("V3-ALERT: Alert count")
-
-resp = client.get("/api/alerts/count")
-T("ALERT-1: alert count → 200", resp.status_code == 200)
-alert_data = resp.json()
-T("ALERT-1a: has unread field", "unread" in alert_data)
-T("ALERT-1b: unread is int", isinstance(alert_data.get("unread"), int))
-
-
-# ===========================================================================
-# Cleanup: remove test watchlist item
-# ===========================================================================
-try:
-    wl = client.get("/api/watchlist").json()
-    for item in wl.get("items", []):
-        if item.get("item_id") == "TEST_V3":
-            client.delete(f"/api/watchlist/remove/{item['id']}")
-except Exception:
-    pass
 
 
 # ===========================================================================

@@ -10,8 +10,6 @@ const DEFAULT_WIDGETS: DashboardWidget[] = [
   { id: "narrative_radar", type: "narrative_radar", title: "Narrative Radar" },
   { id: "signal_leaderboard", type: "signal_leaderboard", title: "Signal Leaderboard" },
   { id: "top_movers", type: "top_movers", title: "Top Movers" },
-  { id: "sentiment_meter", type: "sentiment_meter", title: "Sentiment Meter" },
-  { id: "alert_feed", type: "alert_feed", title: "Alert Feed" },
 ];
 
 const DEFAULT_GRID: GridLayout = {
@@ -19,8 +17,6 @@ const DEFAULT_GRID: GridLayout = {
     { i: "narrative_radar", x: 0, y: 0, w: 8, h: 4 },
     { i: "signal_leaderboard", x: 8, y: 0, w: 4, h: 4 },
     { i: "top_movers", x: 0, y: 4, w: 4, h: 3 },
-    { i: "sentiment_meter", x: 4, y: 4, w: 4, h: 3 },
-    { i: "alert_feed", x: 8, y: 4, w: 4, h: 3 },
   ],
 };
 

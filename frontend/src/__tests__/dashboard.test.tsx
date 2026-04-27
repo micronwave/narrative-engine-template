@@ -3,9 +3,7 @@
  *
  * 11. Dashboard page renders with default widget layout
  * 12. WidgetCatalog shows available widget types
- * 13. Portfolio page renders allocation treemap section
- * 14. Alerts page renders notification list
- * 15. Alerts page renders rules management tab
+ * 13. WidgetRenderer body smoke coverage
  */
 
 import React from "react";
@@ -56,12 +54,6 @@ global.fetch = jest.fn().mockImplementation((url: string) => {
     data = { exposures: [] };
   } else if (u.includes("/api/portfolio")) {
     data = { id: "p1", name: "My Portfolio", holdings: [{ id: "h1", ticker: "AAPL", shares: 10 }] };
-  } else if (u.includes("/api/alerts/types")) {
-    data = { ns_above: "Ns score above", mutation: "Mutation detected", price_above: "Price above" };
-  } else if (u.includes("/api/alerts/rules")) {
-    data = [];
-  } else if (u.includes("/api/alerts")) {
-    data = [];
   } else if (u.includes("/api/ticker")) {
     data = [];
   } else if (u.includes("/api/narratives")) {
@@ -73,10 +65,6 @@ global.fetch = jest.fn().mockImplementation((url: string) => {
       { symbol: "NVDA", name: "NVIDIA Corp", current_price: 850.0, price_change_24h: 3.5 },
       { symbol: "TSLA", name: "Tesla Inc", current_price: 175.0, price_change_24h: -2.1 },
     ];
-  } else if (u.includes("/api/sentiment/market")) {
-    data = { market_score: 0.4, bullish_pct: 55, bearish_pct: 20, neutral_pct: 25 };
-  } else if (u.includes("/api/watchlist")) {
-    data = { watchlist_id: "wl1", items: [{ id: "i1", item_id: "AAPL", item_type: "ticker", current_price: 190.0 }] };
   } else if (u.includes("/api/analytics/sector-convergence")) {
     data = { sectors: [{ name: "Technology", narrative_count: 3, weighted_pressure: 4.2 }] };
   } else if (u.includes("/api/earnings/upcoming")) {
@@ -98,28 +86,9 @@ global.ResizeObserver = class {
   disconnect() {}
 };
 
-// ---------------------------------------------------------------------------
-// Mock contexts used by AlertsPage and PortfolioPage
-// ---------------------------------------------------------------------------
-
-jest.mock("@/contexts/AlertContext", () => ({
-  useAlerts: () => ({
-    unreadCount: 0,
-    markRead: jest.fn(),
-    markAllRead: jest.fn(),
-    refresh: jest.fn(),
-  }),
-  AlertProvider: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
-}));
-
 jest.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ isSignedIn: false, signIn: jest.fn(), signOut: jest.fn(), token: null }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
-}));
-
-jest.mock("@/contexts/WatchlistContext", () => ({
-  useWatchlist: () => ({ watchlist: [], isWatched: () => false, toggle: jest.fn() }),
-  WatchlistProvider: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
 }));
 
 // ---------------------------------------------------------------------------
@@ -171,7 +140,6 @@ describe("DashboardPage", () => {
         expect(screen.getByTestId("dashboard-grid")).toBeInTheDocument();
       });
       expect(screen.queryByTestId("widget-body-narrative_radar")).toBeNull();
-      expect(screen.queryByTestId("widget-body-alert_feed")).toBeNull();
     } finally {
       fetchMock.mockImplementation(previousImpl);
     }
@@ -221,85 +189,14 @@ describe("WidgetCatalog", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 13. Portfolio page renders allocation treemap section
-// ---------------------------------------------------------------------------
-
-describe("PortfolioPage", () => {
-  it("renders the allocation treemap section", async () => {
-    const { default: PortfolioPage } = await import("../app/portfolio/page");
-    await act(async () => {
-      render(<PortfolioPage />);
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("allocation-treemap")).toBeInTheDocument();
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 14. Alerts page renders notification list
-// ---------------------------------------------------------------------------
-
-describe("AlertsPage — notification list", () => {
-  it("renders the notification list (default tab)", async () => {
-    const { default: AlertsPage } = await import("../app/alerts/page");
-    await act(async () => {
-      render(<AlertsPage />);
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("notification-list")).toBeInTheDocument();
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 15. Alerts page renders rules management tab
-// ---------------------------------------------------------------------------
-
-describe("AlertsPage — rules tab", () => {
-  it("renders the Rules tab button", async () => {
-    const { default: AlertsPage } = await import("../app/alerts/page");
-    await act(async () => {
-      render(<AlertsPage />);
-    });
-    // Tab buttons are always rendered — check the tabs container exists
-    await waitFor(() => {
-      expect(screen.getByTestId("alert-tabs")).toBeInTheDocument();
-    });
-    expect(screen.getByText(/Rules/)).toBeInTheDocument();
-  });
-
-  it("renders the rules management section on click", async () => {
-    const { default: AlertsPage } = await import("../app/alerts/page");
-    await act(async () => {
-      render(<AlertsPage />);
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("alert-tabs")).toBeInTheDocument();
-    });
-    // Click the Rules tab
-    await act(async () => {
-      fireEvent.click(screen.getByText(/^Rules$/));
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("rules-management")).toBeInTheDocument();
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 16. Widget body tests — each widget exits loading state and renders data
+// 13. Widget body tests — each widget exits loading state and renders data
 // ---------------------------------------------------------------------------
 
 const WIDGET_TYPES = [
   "narrative_radar",
   "signal_leaderboard",
   "top_movers",
-  "sentiment_meter",
-  "alert_feed",
-  "watchlist",
   "market_heatmap",
-  "portfolio_summary",
   "convergence_radar",
   "economic_calendar",
 ] as const;

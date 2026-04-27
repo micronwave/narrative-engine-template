@@ -3,13 +3,11 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Radio, Network, Inbox, BarChart2, ShieldAlert, TrendingUp, Briefcase, Bell, MoreHorizontal, X, Activity, MessageSquare, LayoutDashboard } from "lucide-react";
-import { useAlerts } from "@/contexts/AlertContext";
+import { Radio, Network, Inbox, BarChart2, ShieldAlert, TrendingUp, MoreHorizontal, X, LayoutDashboard } from "lucide-react";
 
 const PRIMARY_TABS = [
   { href: "/", label: "Signals", icon: Radio },
   { href: "/stocks", label: "Stocks", icon: BarChart2 },
-  { href: "/portfolio", label: "Portfolio", icon: Briefcase },
   { href: "/constellation", label: "Analytics", icon: Network },
 ];
 
@@ -18,15 +16,12 @@ const OVERFLOW_ITEMS = [
   { href: "/signals", label: "Inbox", icon: Inbox },
   { href: "/market-impact", label: "Market Impact", icon: TrendingUp },
   { href: "/manipulation", label: "Manipulation", icon: ShieldAlert },
-  { href: "/sentiment", label: "Sentiment", icon: Activity },
-  { href: "/social", label: "Social", icon: MessageSquare },
 ];
 
 const NAV_ITEMS = [...PRIMARY_TABS, ...OVERFLOW_ITEMS];
 
 export default function NavBar() {
   const pathname = usePathname();
-  const { unreadCount } = useAlerts();
   const [moreOpen, setMoreOpen] = useState(false);
 
   return (
@@ -91,30 +86,6 @@ export default function NavBar() {
           })}
         </div>
 
-        {/* Alert bell */}
-        <Link
-          href="/signals"
-          className="flex items-center gap-3 px-5 py-3 mt-auto shrink-0 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-          aria-label={`Alerts${unreadCount > 0 ? ` — ${unreadCount} unread` : ""}`}
-        >
-          <span className="relative shrink-0">
-            <Bell size={18} />
-            {unreadCount > 0 && (
-              <span
-                className="absolute -top-1.5 -right-1.5 flex items-center justify-center min-w-[16px] h-4 rounded-full text-[10px] font-bold"
-                style={{ background: "var(--intent-danger)", color: "var(--text-primary)", padding: "0 4px" }}
-              >
-                {unreadCount > 99 ? "99+" : unreadCount}
-              </span>
-            )}
-          </span>
-          <span
-            className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 whitespace-nowrap"
-            style={{ fontSize: "var(--text-small)", fontWeight: 500 }}
-          >
-            Alerts
-          </span>
-        </Link>
       </nav>
 
       {/* Mobile bottom tab bar — 4 primary + More */}
@@ -203,25 +174,6 @@ export default function NavBar() {
                   </Link>
                 );
               })}
-              {/* Alert bell in More sheet */}
-              <Link
-                href="/signals"
-                onClick={() => setMoreOpen(false)}
-                className="flex items-center gap-3 px-3 py-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-              >
-                <span className="relative">
-                  <Bell size={18} />
-                  {unreadCount > 0 && (
-                    <span
-                      className="absolute -top-1.5 -right-1.5 flex items-center justify-center min-w-[16px] h-4 rounded-full text-[10px] font-bold"
-                      style={{ background: "var(--intent-danger)", color: "var(--text-primary)", padding: "0 4px" }}
-                    >
-                      {unreadCount > 99 ? "99+" : unreadCount}
-                    </span>
-                  )}
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 500 }}>Alerts</span>
-              </Link>
             </div>
           </div>
         </>

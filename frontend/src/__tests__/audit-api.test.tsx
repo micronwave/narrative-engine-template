@@ -10,10 +10,6 @@
  *   A-URL-3: fetchBrief encodes ticker with path traversal
  *   A-URL-4: compareNarrativeSnapshots encodes date params via URLSearchParams
  *   A-URL-5: fetchCorrelation encodes both narrativeId and ticker
- *   A-URL-6: removeFromWatchlist encodes itemId
- *   A-URL-7: deleteAlertRule encodes ruleId
- *   A-URL-8: toggleAlertRule encodes ruleId
- *   A-URL-9: markAlertRead encodes notificationId
  *   A-URL-10: exportNarrative encodes narrative ID
  *   A-URL-11: fetchNarrativeManipulation encodes narrative ID
  *   A-URL-12: fetchNarrativeHistory encodes narrative ID
@@ -22,15 +18,11 @@
  *   A-URL-15: fetchNarrativeCorrelations encodes narrative ID
  *   A-URL-16: fetchNarrativeSources encodes narrative ID
  *   A-URL-17: fetchNarrativeDocuments encodes narrative ID
- *   A-URL-18: removePortfolioHolding encodes holdingId
  *   A-URL-19: fetchNarrativeTimeline encodes narrative ID
  *   A-URL-20: analyzeNarrative encodes narrative ID
  *   A-URL-21: fetchNarrativeAssets encodes narrative ID
  *
  * Error Handling:
- *   A-ERR-1: markAlertRead throws on non-ok response
- *   A-ERR-2: markAllAlertsRead throws on non-ok response
- *   A-ERR-3: fetchAlertCount returns { unread: 0 } on failure (documented fallback)
  *   A-ERR-4: fetchUpcomingEarnings returns [] on failure (documented fallback)
  *   A-ERR-5: All standard fetch functions throw on non-ok response
  *
@@ -95,11 +87,6 @@ import {
   fetchBrief,
   compareNarrativeSnapshots,
   fetchCorrelation,
-  removeFromWatchlist,
-  deleteAlertRule,
-  toggleAlertRule,
-  markAlertRead,
-  markAllAlertsRead,
   exportNarrative,
   fetchNarrativeManipulation,
   fetchNarrativeHistory,
@@ -108,11 +95,9 @@ import {
   fetchNarrativeCorrelations,
   fetchNarrativeSources,
   fetchNarrativeDocuments,
-  removePortfolioHolding,
   fetchNarrativeTimeline,
   analyzeNarrative,
   fetchNarrativeAssets,
-  fetchAlertCount,
   fetchUpcomingEarnings,
   fetchStocks,
   fetchManipulation,
@@ -123,16 +108,9 @@ import {
   fetchAssetClasses,
   fetchSecurities,
   fetchActivity,
-  fetchWatchlist,
-  addToWatchlist,
-  createAlertRule,
-  fetchAlertRules,
   fetchCoordinationSummary,
   fetchCorrelationMatrix,
   fetchBufferStatus,
-  fetchPortfolio,
-  addPortfolioHolding,
-  fetchPortfolioExposure,
   fetchMomentumLeaderboard,
   fetchNarrativeHistories,
   fetchNarrativeOverlap,
@@ -194,34 +172,6 @@ describe("URL encoding — path parameters", () => {
     expect(url).toContain("lead_days=3");
   });
 
-  test("A-URL-6: removeFromWatchlist encodes itemId", async () => {
-    mockOk({});
-    await removeFromWatchlist(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
-  test("A-URL-7: deleteAlertRule encodes ruleId", async () => {
-    mockOk({});
-    await deleteAlertRule(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
-  test("A-URL-8: toggleAlertRule encodes ruleId", async () => {
-    mockOk({});
-    await toggleAlertRule(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
-  test("A-URL-9: markAlertRead encodes notificationId", async () => {
-    mockOk();
-    await markAlertRead(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
   test("A-URL-10: exportNarrative encodes narrative ID", async () => {
     mockOk();
     await exportNarrative(DANGEROUS_ID, "token");
@@ -278,13 +228,6 @@ describe("URL encoding — path parameters", () => {
     expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
   });
 
-  test("A-URL-18: removePortfolioHolding encodes holdingId", async () => {
-    mockOk({});
-    await removePortfolioHolding(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
   test("A-URL-19: fetchNarrativeTimeline encodes narrative ID", async () => {
     mockOk({ narrative_id: "x", timeline: [] });
     await fetchNarrativeTimeline(DANGEROUS_ID);
@@ -312,22 +255,6 @@ describe("URL encoding — path parameters", () => {
 // ---------------------------------------------------------------------------
 
 describe("Error handling", () => {
-  test("A-ERR-1: markAlertRead throws on non-ok response", async () => {
-    mockFail(500);
-    await expect(markAlertRead("abc")).rejects.toThrow("mark alert read failed: 500");
-  });
-
-  test("A-ERR-2: markAllAlertsRead throws on non-ok response", async () => {
-    mockFail(500);
-    await expect(markAllAlertsRead()).rejects.toThrow("mark all alerts read failed: 500");
-  });
-
-  test("A-ERR-3: fetchAlertCount returns { unread: 0 } on failure", async () => {
-    mockFail(500);
-    const result = await fetchAlertCount();
-    expect(result).toEqual({ unread: 0 });
-  });
-
   test("A-ERR-4: fetchUpcomingEarnings returns [] on failure", async () => {
     mockFail(500);
     const result = await fetchUpcomingEarnings();
@@ -376,28 +303,6 @@ describe("Error handling", () => {
     await expect(fetchActivity()).rejects.toThrow("activity fetch failed: 500");
   });
 
-  test("A-ERR-5m: fetchWatchlist throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchWatchlist()).rejects.toThrow("watchlist fetch failed: 500");
-  });
-
-  test("A-ERR-5n: addToWatchlist throws on 400", async () => {
-    mockFail(400);
-    await expect(addToWatchlist("narrative", "id")).rejects.toThrow("watchlist add failed: 400");
-  });
-
-  test("A-ERR-5o: createAlertRule throws on 400", async () => {
-    mockFail(400);
-    await expect(createAlertRule("burst", "narrative", "n1")).rejects.toThrow(
-      "alert rule create failed: 400"
-    );
-  });
-
-  test("A-ERR-5p: fetchAlertRules throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchAlertRules()).rejects.toThrow("alert rules fetch failed: 500");
-  });
-
   test("A-ERR-5q: fetchCoordinationSummary throws on 500", async () => {
     mockFail(500);
     await expect(fetchCoordinationSummary()).rejects.toThrow("coordination summary failed: 500");
@@ -411,21 +316,6 @@ describe("Error handling", () => {
   test("A-ERR-5s: fetchBufferStatus throws on 500", async () => {
     mockFail(500);
     await expect(fetchBufferStatus()).rejects.toThrow("buffer status failed: 500");
-  });
-
-  test("A-ERR-5t: fetchPortfolio throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchPortfolio()).rejects.toThrow("portfolio fetch failed: 500");
-  });
-
-  test("A-ERR-5u: addPortfolioHolding throws on 400", async () => {
-    mockFail(400);
-    await expect(addPortfolioHolding("AAPL")).rejects.toThrow("holding add failed: 400");
-  });
-
-  test("A-ERR-5v: fetchPortfolioExposure throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchPortfolioExposure()).rejects.toThrow("exposure fetch failed: 500");
   });
 
   test("A-ERR-5w: fetchMomentumLeaderboard throws on 500", async () => {

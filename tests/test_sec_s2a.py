@@ -95,7 +95,7 @@ client = TestClient(app)
 STUB_HEADER = {"x-auth-token": STUB_AUTH_TOKEN}
 
 # ---------------------------------------------------------------------------
-# All 38 endpoints that should now require get_optional_user
+# All protected endpoints that should now require get_optional_user
 # ---------------------------------------------------------------------------
 
 # (method, path, needs_db) — needs_db=True means the endpoint calls get_repo()
@@ -112,7 +112,6 @@ PROTECTED_ENDPOINTS = [
     ("GET", "/api/signals", True),
     ("GET", "/api/stocks", False),
     ("GET", "/api/stocks/AAPL", False),
-    ("GET", "/api/alerts/types", False),
     ("GET", "/api/manipulation", True),
     ("GET", "/api/narratives/test-id-000/manipulation", True),
     ("GET", "/api/brief/AAPL", False),
@@ -225,7 +224,7 @@ T(
 )
 
 # ===========================================================================
-# Section 4: All 38 endpoints have get_optional_user dependency
+# Section 4: Protected endpoints have get_optional_user dependency
 # ===========================================================================
 S("C5: Endpoint signatures include user param")
 
@@ -249,7 +248,6 @@ _ROUTE_PATTERNS = [
     "/api/signals",
     "/api/stocks",
     "/api/stocks/{symbol}",
-    "/api/alerts/types",
     "/api/manipulation",
     "/api/narratives/{narrative_id}/manipulation",
     "/api/brief/{ticker}",
@@ -327,10 +325,6 @@ S("C5: Pre-existing auth endpoints unchanged")
 # These endpoints already had get_optional_user or get_current_user
 _PREEXISTING_AUTH = [
     ("GET", "/api/activity"),
-    ("GET", "/api/watchlist"),
-    ("GET", "/api/alerts/rules"),
-    ("GET", "/api/alerts"),
-    ("GET", "/api/alerts/count"),
     ("GET", "/api/portfolio"),
     ("GET", "/api/portfolio/exposure"),
 ]

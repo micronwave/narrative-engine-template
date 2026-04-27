@@ -51,8 +51,6 @@ jest.mock("../lib/api", () => {
     fetchTicker: jest.fn().mockResolvedValue([]),
     fetchSignals: jest.fn().mockResolvedValue([]),
     fetchActivity: jest.fn().mockResolvedValue([]),
-    fetchWatchlist: jest.fn().mockResolvedValue({ items: [], watchlist_id: null }),
-    fetchAlertRules: jest.fn().mockResolvedValue([]),
     fetchStocks: jest.fn().mockResolvedValue([]),
     fetchAssetClasses: jest.fn().mockResolvedValue([]),
     fetchStockDetail: jest.fn().mockResolvedValue(null),
@@ -65,11 +63,6 @@ jest.mock("../lib/api", () => {
     }),
     fetchBrief: jest.fn().mockResolvedValue({ ticker: "AAPL", security: null, narratives: [], risk_summary: {}, generated_at: "" }),
     fetchCorrelationMatrix: jest.fn().mockResolvedValue({ pairs: [], generated_at: 0, cached: false }),
-    removeFromWatchlist: jest.fn().mockResolvedValue({ status: "ok" }),
-    createAlertRule: jest.fn().mockResolvedValue({ status: "ok", rule_id: "r1" }),
-    deleteAlertRule: jest.fn().mockResolvedValue({ status: "ok" }),
-    toggleAlertRule: jest.fn().mockResolvedValue({ status: "ok", enabled: true }),
-    markAllAlertsRead: jest.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -143,10 +136,8 @@ jest.mock("../lib/colors", () => ({
 // Import after mocks
 import {
   fetchNarratives, fetchTicker, fetchSignals, fetchActivity,
-  fetchWatchlist, fetchAlertRules, fetchStocks, fetchAssetClasses,
+  fetchStocks, fetchAssetClasses,
   fetchConstellation, fetchManipulation, fetchBrief, fetchCorrelation,
-  removeFromWatchlist, createAlertRule, deleteAlertRule, toggleAlertRule,
-  markAllAlertsRead,
 } from "../lib/api";
 import type { VisibleNarrative, ManipulationNarrative } from "../lib/api";
 
@@ -258,80 +249,7 @@ describe("PA-SEC: Security", () => {
 describe("PA-ERR: Error Handling", () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  test("PA-ERR-1: signals handleRemoveWatch shows error on failure", async () => {
-    (fetchSignals as jest.Mock).mockResolvedValue([]);
-    (fetchWatchlist as jest.Mock).mockResolvedValue({
-      items: [{ id: "w1", watchlist_id: "wl1", item_type: "narrative", item_id: "nar-001", added_at: "", name: "Test" }],
-      watchlist_id: "wl1",
-    });
-    (removeFromWatchlist as jest.Mock).mockRejectedValue(new Error("Network error"));
-
-    const SignalsPage = (await import("../app/signals/page")).default;
-    render(<SignalsPage />);
-
-    await waitFor(() => expect(screen.getByLabelText("Remove from watchlist")).toBeInTheDocument());
-    await act(async () => {
-      fireEvent.click(screen.getByLabelText("Remove from watchlist"));
-    });
-
-    await waitFor(() => expect(screen.getByText(/Failed to remove item/)).toBeInTheDocument());
-  });
-
-  test("PA-ERR-2: signals handleDeleteRule shows error on failure", async () => {
-    (fetchSignals as jest.Mock).mockResolvedValue([]);
-    (fetchAlertRules as jest.Mock).mockResolvedValue([
-      { id: "r1", user_id: "u1", rule_type: "mutation", target_type: "narrative", target_id: "nar-001", threshold: null, enabled: 1, created_at: "" },
-    ]);
-    (deleteAlertRule as jest.Mock).mockRejectedValue(new Error("Server error"));
-
-    const SignalsPage = (await import("../app/signals/page")).default;
-    render(<SignalsPage />);
-
-    await waitFor(() => expect(screen.getByLabelText("Delete rule")).toBeInTheDocument());
-    await act(async () => {
-      fireEvent.click(screen.getByLabelText("Delete rule"));
-    });
-
-    await waitFor(() => expect(screen.getByText(/Failed to delete rule/)).toBeInTheDocument());
-  });
-
-  test("PA-ERR-3: signals handleToggleRule shows error on failure", async () => {
-    (fetchSignals as jest.Mock).mockResolvedValue([]);
-    (fetchAlertRules as jest.Mock).mockResolvedValue([
-      { id: "r1", user_id: "u1", rule_type: "mutation", target_type: "narrative", target_id: "nar-001", threshold: null, enabled: 1, created_at: "" },
-    ]);
-    (toggleAlertRule as jest.Mock).mockRejectedValue(new Error("500"));
-
-    const SignalsPage = (await import("../app/signals/page")).default;
-    render(<SignalsPage />);
-
-    await waitFor(() => expect(screen.getByLabelText("Disable rule")).toBeInTheDocument());
-    await act(async () => {
-      fireEvent.click(screen.getByLabelText("Disable rule"));
-    });
-
-    await waitFor(() => expect(screen.getByText(/Failed to toggle rule/)).toBeInTheDocument());
-  });
-
-  test("PA-ERR-4: signals markAllRead error handling", async () => {
-    (fetchSignals as jest.Mock).mockResolvedValue([]);
-    (fetchActivity as jest.Mock).mockResolvedValue([
-      { type: "alert", subtype: "", timestamp: "2026-03-23T10:00:00Z", title: "Unread", message: "", link: "", metadata: {} },
-    ]);
-    (markAllAlertsRead as jest.Mock).mockRejectedValue(new Error("Network failure"));
-
-    const SignalsPage = (await import("../app/signals/page")).default;
-    render(<SignalsPage />);
-
-    await waitFor(() => expect(screen.getByText("Mark all read")).toBeInTheDocument());
-    await act(async () => {
-      fireEvent.click(screen.getByText("Mark all read"));
-    });
-
-    await waitFor(() => expect(screen.getByText(/Failed to mark read/)).toBeInTheDocument());
-  });
-
-  test("PA-ERR-5: constellation page shows error on fetch failure", async () => {
+  test("PA-ERR-1: constellation page shows error on fetch failure", async () => {
     (fetchConstellation as jest.Mock).mockRejectedValue(new Error("503 unavailable"));
 
     const ConstellationPage = (await import("../app/constellation/page")).default;
@@ -340,7 +258,7 @@ describe("PA-ERR: Error Handling", () => {
     await waitFor(() => expect(screen.getByText(/Failed to load constellation/)).toBeInTheDocument());
   });
 
-  test("PA-ERR-6: manipulation page shows error on fetch failure", async () => {
+  test("PA-ERR-2: manipulation page shows error on fetch failure", async () => {
     (fetchManipulation as jest.Mock).mockRejectedValue(new Error("500 internal"));
 
     const ManipulationPage = (await import("../app/manipulation/page")).default;
@@ -635,27 +553,4 @@ describe("PA-UI: UI Behavior", () => {
     );
   });
 
-  test("PA-UI-4: signals page createRule trims whitespace", async () => {
-    (fetchSignals as jest.Mock).mockResolvedValue([]);
-    (fetchAlertRules as jest.Mock).mockResolvedValue([]);
-    (createAlertRule as jest.Mock).mockResolvedValue({ status: "ok", rule_id: "r1" });
-
-    const SignalsPage = (await import("../app/signals/page")).default;
-    render(<SignalsPage />);
-
-    // Open add rule form
-    await waitFor(() => expect(screen.getByText("Add")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Add"));
-
-    // Enter whitespace-padded target
-    const input = screen.getByPlaceholderText("Narrative ID or ticker");
-    fireEvent.change(input, { target: { value: "  nar-001  " } });
-
-    // Submit
-    fireEvent.click(screen.getByText("Create Rule"));
-
-    await waitFor(() =>
-      expect(createAlertRule).toHaveBeenCalledWith("mutation", "narrative", "nar-001", 0.5)
-    );
-  });
 });

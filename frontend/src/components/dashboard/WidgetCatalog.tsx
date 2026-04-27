@@ -4,12 +4,8 @@ import { X } from "lucide-react";
 
 export type WidgetType =
   | "narrative_radar"
-  | "watchlist"
   | "market_heatmap"
   | "top_movers"
-  | "sentiment_meter"
-  | "portfolio_summary"
-  | "alert_feed"
   | "convergence_radar"
   | "signal_leaderboard"
   | "economic_calendar";
@@ -24,11 +20,7 @@ export const WIDGET_DEFINITIONS: WidgetDefinition[] = [
   { type: "narrative_radar", title: "Narrative Radar", description: "Top narratives by Ns score" },
   { type: "signal_leaderboard", title: "Signal Leaderboard", description: "Top directional signals" },
   { type: "top_movers", title: "Top Movers", description: "Biggest price movers" },
-  { type: "sentiment_meter", title: "Sentiment Meter", description: "Market sentiment gauge" },
-  { type: "alert_feed", title: "Alert Feed", description: "Recent notifications" },
-  { type: "watchlist", title: "Watchlist", description: "Your watchlisted tickers and narratives" },
   { type: "market_heatmap", title: "Market Heatmap", description: "Ticker sentiment heatmap" },
-  { type: "portfolio_summary", title: "Portfolio Summary", description: "Portfolio value and P&L" },
   { type: "convergence_radar", title: "Convergence Radar", description: "Top convergence pressure tickers" },
   { type: "economic_calendar", title: "Economic Calendar", description: "Upcoming earnings and FOMC" },
 ];

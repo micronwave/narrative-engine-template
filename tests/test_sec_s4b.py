@@ -311,10 +311,6 @@ for _fn, _var in [
 S("L4 — other ID endpoints have max_length=50")
 
 _OTHER_ID_FUNCS = [
-    "def remove_from_watchlist(",
-    "def delete_alert_rule(",
-    "def toggle_alert_rule(",
-    "def mark_alert_read(",
     "def remove_holding(",
 ]
 for _fn in _OTHER_ID_FUNCS:

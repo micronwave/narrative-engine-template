@@ -1,9 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Search, ArrowUp, ArrowDown, Minus, Telescope, Radar, Star } from "lucide-react";
+import { Search, ArrowUp, ArrowDown, Minus, Telescope, Radar } from "lucide-react";
 import type { VisibleNarrative } from "@/lib/api";
-import { useWatchlist } from "@/contexts/WatchlistContext";
 import VelocitySparkline from "./VelocitySparkline";
 import MomentumBar from "./MomentumBar";
 import MiniAreaChart from "./MiniAreaChart";
@@ -154,8 +153,6 @@ function HeroCard({
   narrative: VisibleNarrative;
   onInvestigateClick?: (id: string) => void;
 }) {
-  const { isWatched, toggleWatch } = useWatchlist();
-  const watched = isWatched(narrative.id);
   const [expanded, setExpanded] = useState(false);
   const velColor = velSemanticColor(narrative.velocity_summary);
   const { text: ctaLabel, icon: CtaIcon } = ctaText(narrative);
@@ -187,18 +184,6 @@ function HeroCard({
         <div className="p-5 flex flex-col">
           {/* Stage + topics row */}
           <div className="flex items-center gap-3 mb-3">
-            <button
-              onClick={(e) => { e.stopPropagation(); toggleWatch("narrative", narrative.id); }}
-              className="shrink-0"
-              style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
-              aria-label={watched ? "Remove from watchlist" : "Add to watchlist"}
-            >
-              <Star
-                size={16}
-                fill={watched ? "var(--intent-warning)" : "none"}
-                stroke={watched ? "var(--intent-warning)" : "var(--text-disabled)"}
-              />
-            </button>
             {narrative.stage && (
               <span
                 data-testid="stage-badge"
@@ -374,8 +359,6 @@ function SecondaryCard({
   showSummary?: boolean;
   onInvestigateClick?: (id: string) => void;
 }) {
-  const { isWatched, toggleWatch } = useWatchlist();
-  const watched = isWatched(narrative.id);
   const vel = parseVelocity(narrative.velocity_summary);
   const velColor = velSemanticColor(narrative.velocity_summary);
   const [hoverCta, setHoverCta] = useState(false);
@@ -397,18 +380,6 @@ function SecondaryCard({
     >
       <div className="flex items-start justify-between gap-2 mb-1">
         <div className="flex items-center gap-2 min-w-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); toggleWatch("narrative", narrative.id); }}
-            className="shrink-0"
-            style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
-            aria-label={watched ? "Remove from watchlist" : "Add to watchlist"}
-          >
-            <Star
-              size={14}
-              fill={watched ? "var(--intent-warning)" : "none"}
-              stroke={watched ? "var(--intent-warning)" : "var(--text-disabled)"}
-            />
-          </button>
           <h3
             className="text-text-primary font-medium leading-snug line-clamp-2"
             style={{ fontSize: 15, fontFamily: "var(--font-display)", letterSpacing: "-0.01em" }}
