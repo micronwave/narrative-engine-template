@@ -420,80 +420,68 @@ try:
             "numpy._core.numeric": {"_frombuffer"},
             "numpy.core.numeric": {"_frombuffer"},
         })
-        T("H1b asset_library.pkl payload is dict", isinstance(_lib_h, dict),
-          f"type={type(_lib_h).__name__}")
 
-        if isinstance(_lib_h, dict):
-            def _entry_embedding_h(lib: dict, ticker: str):
-                row = lib.get(ticker)
-                if isinstance(row, dict):
-                    return row.get("embedding")
-                return None
+        def _entry_embedding_h(lib: dict, ticker: str):
+            row = lib.get(ticker)
+            if isinstance(row, dict):
+                return row.get("embedding")
+            return None
 
-            # H2: NKE present with a valid non-zero float32 embedding
-            _nke_emb_h = _entry_embedding_h(_lib_h, "NKE")
-            _nke_ok = (
-                isinstance(_nke_emb_h, np.ndarray)
-                and _nke_emb_h.ndim == 1
-                and _nke_emb_h.shape[0] > 0
-                and _nke_emb_h.dtype == np.float32
-                and float(np.linalg.norm(_nke_emb_h)) > 0.0
-            )
-            T("H2 NKE present with valid embedding", _nke_ok,
-              "NKE missing or embedding is zero/empty/non-float32 — rebuild asset library")
+        # H2: NKE present with a valid non-zero float32 embedding
+        _nke_emb_h = _entry_embedding_h(_lib_h, "NKE")
+        _nke_ok = (
+            isinstance(_nke_emb_h, np.ndarray)
+            and _nke_emb_h.ndim == 1
+            and _nke_emb_h.shape[0] > 0
+            and _nke_emb_h.dtype == np.float32
+            and float(np.linalg.norm(_nke_emb_h)) > 0.0
+        )
+        T("H2 NKE present with valid embedding", _nke_ok,
+          "NKE missing or embedding is zero/empty/non-float32 — rebuild asset library")
 
-            # H3: LULU present with a valid non-zero float32 embedding
-            _lulu_emb_h = _entry_embedding_h(_lib_h, "LULU")
-            _lulu_ok = (
-                isinstance(_lulu_emb_h, np.ndarray)
-                and _lulu_emb_h.ndim == 1
-                and _lulu_emb_h.shape[0] > 0
-                and _lulu_emb_h.dtype == np.float32
-                and float(np.linalg.norm(_lulu_emb_h)) > 0.0
-            )
-            T("H3 LULU present with valid embedding", _lulu_ok,
-              "LULU missing or embedding is zero/empty/non-float32 — rebuild asset library")
+        # H3: LULU present with a valid non-zero float32 embedding
+        _lulu_emb_h = _entry_embedding_h(_lib_h, "LULU")
+        _lulu_ok = (
+            isinstance(_lulu_emb_h, np.ndarray)
+            and _lulu_emb_h.ndim == 1
+            and _lulu_emb_h.shape[0] > 0
+            and _lulu_emb_h.dtype == np.float32
+            and float(np.linalg.norm(_lulu_emb_h)) > 0.0
+        )
+        T("H3 LULU present with valid embedding", _lulu_ok,
+          "LULU missing or embedding is zero/empty/non-float32 — rebuild asset library")
 
-            # H4: File timestamp must be sane and not stale (0 <= age <= 180 days)
-            _age_days_h = (_time_h.time() - _lib_path_h.stat().st_mtime) / 86400.0
-            T("H4 asset_library.pkl age <= 180 days",
-              0.0 <= _age_days_h <= 180.0,
-              f"age={_age_days_h:.1f} days — rebuild with: python build_asset_library.py")
+        # H4: File timestamp must be sane and not stale (0 <= age <= 180 days)
+        _age_days_h = (_time_h.time() - _lib_path_h.stat().st_mtime) / 86400.0
+        T("H4 asset_library.pkl age <= 180 days",
+          0.0 <= _age_days_h <= 180.0,
+          f"age={_age_days_h:.1f} days — rebuild with: python build_asset_library.py")
 
-            # H5: Representative critical tickers present across asset classes
-            _critical_h = ["AAPL", "MSFT", "NVDA", "GLD", "BTC-USD"]
-            for _ct_h in _critical_h:
-                T(f"H5 critical ticker {_ct_h} present",
-                  _ct_h in _lib_h,
-                  f"{_ct_h} missing from asset library — rebuild")
+        # H5: Representative critical tickers present across asset classes
+        _critical_h = ["AAPL", "MSFT", "NVDA", "GLD", "BTC-USD"]
+        for _ct_h in _critical_h:
+            T(f"H5 critical ticker {_ct_h} present",
+              _ct_h in _lib_h,
+              f"{_ct_h} missing from asset library — rebuild")
 
-            # H6: Every embedding is valid and matches the active pipeline dimension
-            _expected_dims_h = {"dense": 768, "hybrid": 832}
-            _expected_dim_h = _expected_dims_h.get(_settings_h.EMBEDDING_MODE)
-            T("H6a EMBEDDING_MODE supported for audit", _expected_dim_h is not None,
-              f"mode={_settings_h.EMBEDDING_MODE!r}")
-            if _expected_dim_h is not None:
-                _invalid_embeddings_h = []
-                for _ticker_h, _row_h in _lib_h.items():
-                    _emb_h = _row_h.get("embedding") if isinstance(_row_h, dict) else None
-                    if not isinstance(_emb_h, np.ndarray):
-                        _invalid_embeddings_h.append(_ticker_h)
-                        continue
-                    if _emb_h.ndim != 1 or _emb_h.shape[0] != _expected_dim_h:
-                        _invalid_embeddings_h.append(_ticker_h)
-                T("H6 all embeddings match pipeline dimension",
-                  len(_invalid_embeddings_h) == 0,
-                  f"invalid entries (first 5): {_invalid_embeddings_h[:5]} "
-                  f"expected_dim={_expected_dim_h} — rebuild with matching EMBEDDING_MODE")
+        # H6: Every embedding matches the active pipeline dimension
+        _expected_dims_h = {"dense": 768, "hybrid": 832}
+        _expected_dim_h = _expected_dims_h.get(_settings_h.EMBEDDING_MODE)
+        _invalid_embeddings_h = []
+        if _expected_dim_h is None:
+            _invalid_embeddings_h.append(f"unsupported EMBEDDING_MODE={_settings_h.EMBEDDING_MODE!r}")
         else:
-            _skipped_bad_type_h = [
-                "H2 NKE embedding", "H3 LULU embedding", "H4 staleness",
-                "H5 AAPL", "H5 MSFT", "H5 NVDA", "H5 GLD", "H5 BTC-USD",
-                "H6a embedding mode check", "H6 dimension consistency",
-            ]
-            for _sh in _skipped_bad_type_h:
-                T(f"{_sh} (skipped — invalid payload type)", False,
-                  "asset_library.pkl must deserialize to dict")
+            for _ticker_h, _row_h in _lib_h.items():
+                _emb_h = _row_h.get("embedding") if isinstance(_row_h, dict) else None
+                if not isinstance(_emb_h, np.ndarray):
+                    _invalid_embeddings_h.append(_ticker_h)
+                    continue
+                if _emb_h.ndim != 1 or _emb_h.shape[0] != _expected_dim_h:
+                    _invalid_embeddings_h.append(_ticker_h)
+        T("H6 all embeddings match pipeline dimension",
+          len(_invalid_embeddings_h) == 0,
+          f"invalid entries (first 5): {_invalid_embeddings_h[:5]} "
+          f"expected_dim={_expected_dim_h} — rebuild with matching EMBEDDING_MODE")
 
     else:
         _skipped_h = [
