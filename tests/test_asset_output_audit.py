@@ -246,11 +246,39 @@ S("D. AssetMapper — query normalization (Fix 4)")
 
 try:
     from asset_mapper import AssetMapper
-    from embedding_model import MiniLMEmbedder
-    from settings import Settings
 
-    _settings_d = Settings()
-    _embedder_d = MiniLMEmbedder(_settings_d)
+    class _OfflineTestEmbedder:
+        """Deterministic local embedder for offline-safe AssetMapper tests."""
+
+        def __init__(self, dim: int = 8) -> None:
+            self._dim = dim
+
+        def _vec(self, text: str) -> np.ndarray:
+            t = (text or "").lower()
+            v = np.zeros(self._dim, dtype=np.float32)
+            if "apple" in t:
+                v[0] += 1.0
+            if "iphone" in t:
+                v[1] += 1.0
+            if "tech" in t or "technology" in t or "smartphone" in t:
+                v[2] += 1.0
+            if not np.any(v):
+                v[-1] = 1.0
+            norm = float(np.linalg.norm(v))
+            return v if norm == 0.0 else (v / norm).astype(np.float32)
+
+        def embed(self, texts: list[str]) -> np.ndarray:
+            if not texts:
+                return np.empty((0, self._dim), dtype=np.float32)
+            return np.stack([self._vec(t) for t in texts]).astype(np.float32)
+
+        def embed_single(self, text: str) -> np.ndarray:
+            return self._vec(text)
+
+        def dimension(self) -> int:
+            return self._dim
+
+    _embedder_d = _OfflineTestEmbedder(dim=8)
     _dim = _embedder_d.dimension()
 
     # Build a small test library
