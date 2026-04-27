@@ -82,6 +82,17 @@ def build_training_dataset(repository) -> tuple[list[list[float]], list[int]]:
             unique.append(n)
     candidates = unique
 
+    _stats = {
+        "narratives_evaluated": len(candidates),
+        "assets_examined": 0,
+        "assets_filtered_text_mention": 0,
+        "assets_filtered_zero_score": 0,
+        "assets_filtered_topic": 0,
+        "assets_retained": 0,
+        "narratives_no_tickers": 0,
+        "samples_accepted": 0,
+    }
+
     X = []
     y = []
 
@@ -137,21 +148,31 @@ def build_training_dataset(repository) -> tuple[list[list[float]], list[int]]:
 
         # Extract tickers — skip TOPIC: entries and text-mention fallback assets.
         # Fallback assets (source="text_mention", similarity_score=0.0) have no
-        # embedding confidence; including them in training pollutes labels.
+        # embedding confidence, so including them in training labels introduces
+        # price-move associations for narratives that may not actually reference
+        # the linked ticker in a financially meaningful way.
         tickers = []
         for asset in linked_assets:
+            _stats["assets_examined"] += 1
             if isinstance(asset, dict):
                 if asset.get("source") == "text_mention":
+                    _stats["assets_filtered_text_mention"] += 1
                     continue
                 if _safe_float(asset.get("similarity_score"), 0.0) <= 0.0:
+                    _stats["assets_filtered_zero_score"] += 1
                     continue
                 t = asset.get("ticker", "")
             else:
                 t = str(asset)
-            if t and not t.startswith("TOPIC:"):
-                tickers.append(t)
+            ticker = t if isinstance(t, str) else str(t or "")
+            if ticker and not ticker.startswith("TOPIC:"):
+                tickers.append(ticker)
+                _stats["assets_retained"] += 1
+            elif ticker.startswith("TOPIC:"):
+                _stats["assets_filtered_topic"] += 1
 
         if not tickers:
+            _stats["narratives_no_tickers"] += 1
             continue
 
         # Check price movement for first valid ticker
@@ -245,7 +266,23 @@ def build_training_dataset(repository) -> tuple[list[list[float]], list[int]]:
 
         X.append(features)
         y.append(label)
+        _stats["samples_accepted"] += 1
 
+    logger.info(
+        "build_training_dataset: evaluated=%d assets_examined=%d "
+        "filtered_text_mention=%d filtered_zero_score=%d "
+        "filtered_topic=%d assets_retained=%d no_tickers=%d "
+        "accepted=%d (X=%d, y=%d)",
+        _stats["narratives_evaluated"],
+        _stats["assets_examined"],
+        _stats["assets_filtered_text_mention"],
+        _stats["assets_filtered_zero_score"],
+        _stats["assets_filtered_topic"],
+        _stats["assets_retained"],
+        _stats["narratives_no_tickers"],
+        _stats["samples_accepted"],
+        len(X), len(y),
+    )
     return X, y
 
 

@@ -64,7 +64,10 @@ HEDGE_VOCAB: list[str] = [
 ]
 
 # Extended vocabulary used for entropy entity extraction.
-_ENTITY_VOCAB: list[str] = FISCAL_INTENT_VOCAB + HEDGE_VOCAB + [
+# Intentionally excludes FISCAL_INTENT_VOCAB and HEDGE_VOCAB — those contain
+# common English words ("could", "committed") that inflate entity counts for
+# non-financial narratives. They remain in use by compute_intent_weight().
+_ENTITY_VOCAB: list[str] = [
     "earnings", "revenue", "profit", "loss", "guidance", "forecast",
     "merger", "acquisition", "ipo", "dividend", "buyback", "margin",
     "growth", "expansion", "restructuring", "layoff", "bankruptcy",
@@ -91,8 +94,9 @@ _HEDGE_PATTERNS: list[re.Pattern] = [
 # Candidates are filtered by _KNOWN_TICKERS to prevent acronym false positives (NASA, CEO,
 # WHO) while allowing valid single-letter symbols (F, V, C, A, H, D, O).
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}\b")
-# Known tradeable symbols: S&P 500 constituents + major ADRs.
-# A whitelist beats a blacklist here — handles single-letter tickers and blocks acronyms.
+# Whitelist of known tradeable symbols: S&P 500 constituents + major ADRs.
+# A whitelist beats a blacklist here — it handles single-letter tickers that a blacklist
+# would need to enumerate and prevents false positives that a blacklist can never fully cover.
 _KNOWN_TICKERS: frozenset[str] = frozenset({
     # Mega-cap / broad tech
     "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "GOOG", "META", "TSLA",
@@ -146,7 +150,7 @@ _KNOWN_TICKERS: frozenset[str] = frozenset({
     "ALK", "CSX", "NSC", "UNP",
     # Waste / water
     "WM", "RSG",
-    # Misc
+    # Misc single-letter
     "AVGO", "COIN", "SHOP",
 })
 
@@ -226,17 +230,6 @@ def compute_velocity_windowed(
     return float(np.mean(velocities)) if velocities else 0.0
 
 
-def extract_known_tickers(text: str, min_length: int = 2) -> list[str]:
-    """Return sorted unique tickers from text that are in the known-ticker whitelist.
-
-    min_length=2 (default) excludes single-letter symbols (A, C, D, F, H, O, V) which
-    are indistinguishable from common English words in unstructured news text.
-    """
-    return sorted(
-        {t for t in _TICKER_RE.findall(text) if t in _KNOWN_TICKERS and len(t) >= min_length}
-    )
-
-
 def compute_entropy(
     documents: list[str],
     min_vocab_size: int,
@@ -247,12 +240,14 @@ def compute_entropy(
     Entities = known ticker symbols (whitelist-filtered) + fiscal/financial vocabulary terms.
     Returns None when unique entity count < min_vocab_size.
     By default, excludes single-letter tickers to avoid sentence-leading noise.
+    Set include_single_letter_tickers=True only for explicitly ticker-dense inputs.
     Uses natural log (np.log).
     """
     entity_counts: Counter = Counter()
 
     ticker_min_length = 1 if include_single_letter_tickers else 2
     for doc in documents:
+        # Reuse extract_known_tickers so entropy inherits the same noise controls.
         tickers = extract_known_tickers(doc, min_length=ticker_min_length)
         entity_counts.update(tickers)
 
@@ -276,6 +271,39 @@ def compute_entropy(
             entropy -= p * np.log(p)
 
     return float(entropy)
+
+
+def extract_known_tickers(text: str, min_length: int = 2) -> list[str]:
+    """Return sorted unique tickers from text that are in the known-ticker whitelist.
+
+    min_length=2 (default) excludes single-letter symbols (A, C, D, F, H, O, V) which
+    are indistinguishable from common English words in unstructured news text and cause
+    false-positive asset links.  Pass min_length=1 only when processing bulk financial
+    data where single-letter context is reliable.
+    """
+    return sorted(
+        {t for t in _TICKER_RE.findall(text) if t in _KNOWN_TICKERS and len(t) >= min_length}
+    )
+
+
+def _accept_fallback_ticker(excerpts: list[str], ticker: str) -> bool:
+    """Return True when fallback evidence for ticker is strong enough.
+
+    Accept if:
+      - any excerpt contains $TICKER
+      - any excerpt contains (TICKER) with optional internal whitespace
+      - ticker appears as plain uppercase token in >=2 distinct excerpts
+    """
+    escaped = re.escape(ticker)
+    blob = " ".join(excerpts)
+
+    if re.search(rf"\${escaped}\b", blob):
+        return True
+    if re.search(rf"\(\s*{escaped}\s*\)", blob):
+        return True
+
+    plain_hit_excerpts = sum(1 for ex in excerpts if re.search(rf"\b{escaped}\b", ex))
+    return plain_hit_excerpts >= 2
 
 
 def compute_intent_weight(documents: list[str]) -> float:
