@@ -89,7 +89,6 @@ On Windows, `run_pipeline.bat` is the Task Scheduler entry point — set it to r
 | `/manipulation` | Coordination detection dashboard |
 | `/brief/[ticker]` | Pre-earnings intelligence brief with price history and correlation links |
 | `/correlation` | Velocity-price correlation explorer (Pearson r, lead-time sweep) |
-| `/portfolio` | Portfolio holdings with narrative exposure tracking |
 | `/analytics` | Aggregate analytics — leaderboards, timelines, heatmaps |
 
 ## Narrative lifecycle
@@ -122,7 +121,7 @@ Each narrative also gets 1-3 topic tags from the LLM: `regulatory`, `earnings`, 
 | `api/services/` | Circuit breaker, data normalizer, WebSocket relay |
 | `api/adapters/` | Finnhub, TwelveData, CoinGecko price adapters |
 
-Extension modules (notifications, portfolio, watchlist, export) are manager-pattern classes instantiated in `api/main.py`.
+Extension modules (notifications, watchlist, export) are manager-pattern classes instantiated in `api/main.py`.
 
 ## Tests
 

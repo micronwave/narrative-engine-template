@@ -64,7 +64,7 @@ python -X utf8 tests/test_c2_api.py
 | File | Tests |
 |------|-------|
 | `test_v3_phase1.py` | Auth scaffolding, narrative detail enrichment, coordination, sources |
-| `test_v3_phase2.py` | Portfolio, timeline, compare endpoints |
+| `test_v3_phase2.py` | Timeline and compare endpoints |
 | `test_v3_phase3.py` | Reddit ingester, public interest, earnings, sentiment |
 | `test_v3_phase4.py` | WAL mode, performance indexes, schema columns, smoke tests |
 
@@ -111,8 +111,6 @@ python -X utf8 tests/test_c2_api.py
 |------|-------|
 | `test_pipeline_audit.py` | Pipeline edge cases, settings validation |
 | `test_charting_api.py` | OHLCV price history, interval/period params |
-| `test_sentiment_api.py` | Social sentiment system, spike detection |
-| `test_portfolio_alerts.py` | Portfolio analytics, alert system |
 | `test_cat4_api.py` | Category 4 API integration (Edgar, data normalization) |
 | `test_foundation_fixes.py` | Foundation fix verification (stage hysteresis, filters) |
 

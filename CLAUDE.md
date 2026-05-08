@@ -135,7 +135,6 @@ Adapters are conditionally enabled via `ENABLE_TWELVE_DATA`, `ENABLE_COINGECKO` 
 Manager-pattern classes instantiated in `api/main.py`, backed by `SqliteRepository`:
 
 - `NotificationManager` (`notifications.py`) — rules-based alerting (rule types: `ns_above`, `ns_below`, `new_narrative`, `mutation`, `stage_change`, `catalyst`)
-- `PortfolioManager` (`portfolio.py`) — holdings tracking, narrative impact scoring, CSV import (max 1000 rows)
 - `WatchlistManager` (`watchlist.py`) — ticker/narrative watchlists
 - `ExportManager` (`export.py`) — JSON/CSV export, social share text generation
 
