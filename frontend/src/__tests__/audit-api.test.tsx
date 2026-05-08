@@ -100,7 +100,6 @@ import {
   fetchPriceHistory,
   fetchNarrativeCorrelations,
   fetchNarrativeSources,
-  removePortfolioHolding,
   analyzeNarrative,
   fetchNarrativeAssets,
   fetchAlertCount,
@@ -121,9 +120,6 @@ import {
   fetchCoordinationSummary,
   fetchCorrelationMatrix,
   fetchBufferStatus,
-  fetchPortfolio,
-  addPortfolioHolding,
-  fetchPortfolioExposure,
   fetchMomentumLeaderboard,
   fetchNarrativeHistories,
   fetchNarrativeOverlap,
@@ -248,13 +244,6 @@ describe("URL encoding — path parameters", () => {
     expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
   });
 
-  test("A-URL-18: removePortfolioHolding encodes holdingId", async () => {
-    mockOk({});
-    await removePortfolioHolding(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
   test("A-URL-20: analyzeNarrative encodes narrative ID", async () => {
     mockOk({});
     await analyzeNarrative(DANGEROUS_ID);
@@ -374,21 +363,6 @@ describe("Error handling", () => {
   test("A-ERR-5s: fetchBufferStatus throws on 500", async () => {
     mockFail(500);
     await expect(fetchBufferStatus()).rejects.toThrow("buffer status failed: 500");
-  });
-
-  test("A-ERR-5t: fetchPortfolio throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchPortfolio()).rejects.toThrow("portfolio fetch failed: 500");
-  });
-
-  test("A-ERR-5u: addPortfolioHolding throws on 400", async () => {
-    mockFail(400);
-    await expect(addPortfolioHolding("AAPL")).rejects.toThrow("holding add failed: 400");
-  });
-
-  test("A-ERR-5v: fetchPortfolioExposure throws on 500", async () => {
-    mockFail(500);
-    await expect(fetchPortfolioExposure()).rejects.toThrow("exposure fetch failed: 500");
   });
 
   test("A-ERR-5w: fetchMomentumLeaderboard throws on 500", async () => {
