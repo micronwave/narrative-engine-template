@@ -31,8 +31,6 @@ const TARGET_TYPE_FOR_RULE: Record<string, string> = {
   rsi_overbought: "ticker",
   rsi_oversold: "ticker",
   macd_crossover: "ticker",
-  sentiment_spike: "ticker",
-  portfolio_drawdown: "portfolio",
 };
 
 const THRESHOLD_LABEL: Record<string, string> = {
@@ -44,8 +42,6 @@ const THRESHOLD_LABEL: Record<string, string> = {
   rsi_overbought: "RSI level (default 70)",
   rsi_oversold: "RSI level (default 30)",
   macd_crossover: "Threshold (unused)",
-  sentiment_spike: "Std deviations",
-  portfolio_drawdown: "Drawdown (%)",
 };
 
 function timeAgo(iso: string): string {
@@ -118,7 +114,7 @@ function CreateRuleModal({
 
   const targetType = TARGET_TYPE_FOR_RULE[ruleType] || "ticker";
   const needsThreshold = ruleType in THRESHOLD_LABEL;
-  const needsTarget = targetType !== "portfolio";
+  const needsTarget = true;
 
   const handleSave = async () => {
     setSaving(true);
