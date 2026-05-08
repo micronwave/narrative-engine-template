@@ -100,8 +100,11 @@ data_normalizer = DataNormalizer(adapters=_data_adapters)
 # Phase 2 Batch 4: WebSocket relay instance (None until startup if API key set)
 _ws_relay: FinnhubWebSocketRelay | None = None
 
-# DB path resolved at module level — never import settings here (it requires
-# ANTHROPIC_API_KEY at import time and would break the test suite).
+# DB path resolved at module level. API settings use a safe fallback so imports
+# still work in template tests without a real Anthropic key.
+from settings import get_api_settings
+
+_API_SETTINGS = get_api_settings()
 DB_PATH = str(Path(__file__).parent.parent / "data" / "narrative_engine.db")
 
 # Auth mode: "stub" (single-user MVP) or "jwt" (multi-user)
@@ -125,8 +128,8 @@ _securities_lock = threading.Lock()
 _sse_connections: int = 0
 _sse_per_user: dict[str, int] = {}
 _sse_lock: asyncio.Lock | None = None  # initialized in startup hook
-_SSE_MAX_GLOBAL = 100
-_SSE_MAX_PER_USER = 5
+_SSE_MAX_GLOBAL = int(_API_SETTINGS.SSE_MAX_GLOBAL)
+_SSE_MAX_PER_USER = int(_API_SETTINGS.SSE_MAX_PER_USER)
 _latest_ticker_payload: dict = {"type": "ticker-update", "items": []}
 
 # M10: Brute-force protection for login
@@ -414,11 +417,13 @@ app.add_middleware(
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     """M1: HSTS header + HTTP→HTTPS redirect in production."""
+    start = _time.perf_counter()
     if _ENVIRONMENT == "production":
         if request.headers.get("x-forwarded-proto") == "http":
             https_url = request.url.replace(scheme="https")
             return RedirectResponse(url=str(https_url), status_code=301)
     response = await call_next(request)
+    response.headers["X-Response-Time-Ms"] = f"{(_time.perf_counter() - start) * 1000:.2f}"
     if _ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = (
             "max-age=3600; includeSubDomains"
@@ -1598,7 +1603,7 @@ def auth_signup(request: Request, body: SignupRequest):
         pass  # Non-fatal — never block signup for audit logging failure
 
     secret = _get_jwt_secret()
-    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "2"))
+    expiry_hours = int(_API_SETTINGS.JWT_EXPIRY_HOURS)
     payload = {
         "jti": str(uuid.uuid4()),
         "sub": user_id,
@@ -1741,7 +1746,7 @@ def auth_login(request: Request, body: LoginRequest):
         pass
 
     secret = _get_jwt_secret()
-    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "2"))
+    expiry_hours = int(_API_SETTINGS.JWT_EXPIRY_HOURS)
     payload = {
         "jti": str(uuid.uuid4()),
         "sub": user["id"],
@@ -1898,7 +1903,7 @@ def auth_refresh(request: Request, body: RefreshRequest):
 
     user_id = payload["sub"]
     now_ts = datetime.now(timezone.utc)
-    expiry_hours = int(os.environ.get("JWT_EXPIRY_HOURS", "2"))
+    expiry_hours = int(_API_SETTINGS.JWT_EXPIRY_HOURS)
 
     # New access token
     new_access_payload = {
@@ -2326,7 +2331,25 @@ def _build_visible_narrative(n: dict, repo, include_full: bool = False, signal_l
 @app.get("/api/health")
 @limiter.exempt
 def health():
-    return {"status": "ok"}
+    try:
+        repo = get_repo()
+        db_status = "ok" if repo is not None else "missing"
+    except Exception:
+        db_status = "degraded"
+
+    if _ws_relay is None:
+        ws_status = "disabled"
+    else:
+        try:
+            ws_status = "connected" if _ws_relay.is_connected else "disconnected"
+        except Exception:
+            ws_status = "unknown"
+
+    return {
+        "status": "ok",
+        "db": db_status,
+        "websocket_relay": ws_status,
+    }
 
 
 @app.get("/api/websocket/status")
@@ -3036,6 +3059,25 @@ def get_stock_detail(request: Request, symbol: str = FPath(..., max_length=12), 
 # Activity Feed, Watchlist, Alert Rules — Inbox Tab
 # ===========================================================================
 
+class WatchlistAddRequest(BaseModel):
+    item_type: str
+    item_id: str
+
+
+class AlertRuleRequest(BaseModel):
+    rule_type: str
+    target_type: str
+    target_id: str | None = None
+    threshold: float | None = None
+
+
+def _get_repo_or_503():
+    repo = get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    return repo
+
+
 @app.get("/api/activity")
 def get_activity(limit: int = 100, user: dict = Depends(get_optional_user)):
     """Merged activity feed: mutations + notifications + pipeline events."""
@@ -3100,6 +3142,154 @@ def get_activity(limit: int = 100, user: dict = Depends(get_optional_user)):
 
     items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return items[:limit]
+
+
+@app.get("/api/watchlist")
+def get_watchlist(user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    from watchlist import WatchlistManager
+
+    manager = WatchlistManager(repo)
+    lists = manager.list_watchlists(user["user_id"])
+    if not lists:
+        return {"items": [], "watchlist_id": None, "total": 0, "limit": 200, "offset": 0}
+    watchlist_id = lists[0]["id"]
+    watchlist = manager.get_watchlist(watchlist_id) or {"items": []}
+    items = watchlist.get("items", [])
+    return {
+        "items": items,
+        "watchlist_id": watchlist_id,
+        "total": len(items),
+        "limit": 200,
+        "offset": 0,
+    }
+
+
+@app.post("/api/watchlist/add")
+def add_watchlist_item(payload: WatchlistAddRequest, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    from watchlist import WatchlistManager
+
+    manager = WatchlistManager(repo)
+    lists = manager.list_watchlists(user["user_id"])
+    watchlist_id = lists[0]["id"] if lists else manager.create_watchlist(user["user_id"])
+    try:
+        item_id = manager.add_item(watchlist_id, payload.item_type, payload.item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "added", "item_id": item_id, "watchlist_id": watchlist_id}
+
+
+@app.delete("/api/watchlist/remove/{item_id}")
+def remove_watchlist_item(item_id: str, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    item = repo.get_watchlist_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Watchlist item not found")
+    if item.get("user_id") != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    repo.delete_watchlist_item(item_id)
+    return {"status": "removed"}
+
+
+@app.get("/api/alerts/rules")
+def get_alert_rules(user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    from notifications import NotificationManager
+
+    return NotificationManager(repo).list_rules(user["user_id"])
+
+
+@app.post("/api/alerts/rules")
+def create_alert_rule(payload: AlertRuleRequest, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    from notifications import NotificationManager
+
+    try:
+        rule_id = NotificationManager(repo).create_rule(
+            user["user_id"],
+            payload.rule_type,
+            payload.target_type,
+            payload.target_id,
+            payload.threshold,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "created", "rule_id": rule_id}
+
+
+@app.delete("/api/alerts/rules/{rule_id}")
+def delete_alert_rule(rule_id: str, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    rule = repo.get_notification_rule(rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    if rule.get("user_id") != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from notifications import NotificationManager
+
+    NotificationManager(repo).delete_rule(rule_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/alerts/rules/{rule_id}/toggle")
+def toggle_alert_rule(rule_id: str, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    rule = repo.get_notification_rule(rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    if rule.get("user_id") != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    enabled = not bool(rule.get("enabled"))
+    from notifications import NotificationManager
+
+    NotificationManager(repo).toggle_rule(rule_id, enabled)
+    return {"status": "updated", "enabled": enabled}
+
+
+@app.get("/api/alerts")
+def get_alerts(unread_only: bool = False, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    from notifications import NotificationManager
+
+    return NotificationManager(repo).get_notifications(user["user_id"], unread_only=unread_only)
+
+
+@app.get("/api/alerts/count")
+def get_alert_count(user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    unread = repo.get_notifications(user["user_id"], unread_only=True)
+    return {"unread": len(unread)}
+
+
+@app.post("/api/alerts/read/{notification_id}")
+def mark_alert_read(notification_id: str, user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    notification = repo.get_notification(notification_id)
+    if notification is None:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    if notification.get("user_id") != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from notifications import NotificationManager
+
+    NotificationManager(repo).mark_read(notification_id, user["user_id"])
+    return {"status": "read"}
+
+
+@app.post("/api/alerts/read-all")
+def mark_all_alerts_read(user: dict = Depends(get_optional_user)):
+    repo = _get_repo_or_503()
+    from notifications import NotificationManager
+
+    NotificationManager(repo).mark_all_read(user["user_id"])
+    return {"status": "read"}
+
+
+@app.get("/api/alerts/types")
+def get_alert_types(user: dict = Depends(get_optional_user)):
+    from notifications import RULE_TYPES
+
+    return RULE_TYPES
 
 
 # ===========================================================================
