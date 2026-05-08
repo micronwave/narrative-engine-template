@@ -19,7 +19,6 @@
  *   A-URL-13: fetchPriceHistory encodes symbol
  *   A-URL-15: fetchNarrativeCorrelations encodes narrative ID
  *   A-URL-16: fetchNarrativeSources encodes narrative ID
- *   A-URL-18: removePortfolioHolding encodes holdingId
  *   A-URL-20: analyzeNarrative encodes narrative ID
  *   A-URL-21: fetchNarrativeAssets encodes narrative ID
  *

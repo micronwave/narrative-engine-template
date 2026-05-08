@@ -40,20 +40,6 @@ global.fetch = jest.fn().mockImplementation((url: string) => {
         ],
       },
     };
-  } else if (u.includes("/api/portfolio/summary")) {
-    data = { total_value: 5000, total_pnl: 100, day_change: 50, day_change_pct: 1.0, position_count: 2 };
-  } else if (u.includes("/api/portfolio/allocation")) {
-    data = [{ group: "Technology", value: 5000, pct: 1.0, pnl: 100, tickers: ["AAPL"] }];
-  } else if (u.includes("/api/portfolio/correlation")) {
-    data = { tickers: [], matrix: [], warnings: [] };
-  } else if (u.includes("/api/portfolio/concentration")) {
-    data = { top3_pct: 1.0, top3_warning: false, sector_hhi: 0, sector_concentrated: false, single_stock_warnings: [] };
-  } else if (u.includes("/api/portfolio/performance")) {
-    data = { portfolio: [], benchmark: [], total_return_pct: 0, benchmark_return_pct: 0 };
-  } else if (u.includes("/api/portfolio/exposure")) {
-    data = { exposures: [] };
-  } else if (u.includes("/api/portfolio")) {
-    data = { id: "p1", name: "My Portfolio", holdings: [{ id: "h1", ticker: "AAPL", shares: 10 }] };
   } else if (u.includes("/api/ticker")) {
     data = [];
   } else if (u.includes("/api/narratives")) {
