@@ -2,7 +2,7 @@
 Unified data normalization layer.
 
 Transforms every provider's response into a standard NormalizedQuote format.
-Downstream consumers (charting, alerts, portfolio, correlation) only see this format.
+Downstream consumers (charting, alerts, correlation) only see this format.
 When you add or swap a data provider, you only touch the adapter, never the consumers.
 """
 

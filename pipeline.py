@@ -24,7 +24,9 @@ from ingester import RawDocument, RssIngester
 from llm_client import LlmClient, parse_signal_json
 from output import build_output_object, validate_output, write_outputs
 from repository import SqliteRepository
-from settings import settings
+from settings import get_api_settings
+
+settings = get_api_settings()
 from signals import (
     _accept_fallback_ticker,
     compute_cohesion,
@@ -95,7 +97,7 @@ _FINANCIAL_KEYWORDS: frozenset[str] = frozenset({
     "rate", "inflation", "earnings", "revenue", "gdp",
     "tariff", "ipo", "m&a", "acquisition", "crypto",
     "bitcoin", "oil", "commodity", "yield", "bond",
-    "equity", "sector", "portfolio",
+    "equity", "sector",
 })
 
 

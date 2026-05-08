@@ -723,7 +723,7 @@ MACRO_TOPICS: dict[str, str] = {
     ),
     # Market structure
     "margin call liquidation": (
-        "margin call liquidation forced selling deleveraging portfolio reduction "
+        "margin call liquidation forced selling deleveraging fund reduction "
         "prime brokerage collateral market stress volatility spike"
     ),
     "options expiration OPEX": (

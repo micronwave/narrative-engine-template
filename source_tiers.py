@@ -53,7 +53,6 @@ DOMAIN_TIERS: dict[str, int] = {
     "finance.yahoo.com": 4,
     # Tier 5: Social & community
     "reddit.com": 5,
-    "stocktwits.com": 5,
 }
 
 DEFAULT_TIER: int = 4

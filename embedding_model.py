@@ -9,7 +9,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from safe_pickle import safe_load
-from settings import Settings, settings
+from settings import Settings, get_api_settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,10 @@ class EmbeddingModel(ABC):
 
 class MiniLMEmbedder(EmbeddingModel):
 
-    def __init__(self, settings: Settings = settings) -> None:
-        self._model_name: str = settings.EMBEDDING_MODEL_NAME
-        self._mode: str = settings.EMBEDDING_MODE
+    def __init__(self, settings: Settings | None = None) -> None:
+        cfg = settings or get_api_settings()
+        self._model_name: str = cfg.EMBEDDING_MODEL_NAME
+        self._mode: str = cfg.EMBEDDING_MODE
         try:
             self._model = SentenceTransformer(self._model_name)
         except Exception as exc:
@@ -69,7 +70,7 @@ class MiniLMEmbedder(EmbeddingModel):
         self._svd_path: Path | None = None
 
         if self._mode == "hybrid":
-            data_dir = Path(settings.FAISS_INDEX_PATH).parent
+            data_dir = Path(cfg.FAISS_INDEX_PATH).parent
             self._tfidf_path = data_dir / "tfidf_vectorizer.pkl"
             self._svd_path = data_dir / "tfidf_svd.pkl"
             self._load_hybrid_components()

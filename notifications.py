@@ -123,8 +123,12 @@ class NotificationManager:
             securities: optional dict mapping ticker symbol -> security dict
                         (with 'price'/'current_price' keys) for price-based alerts.
         """
-        from api.services.notification_channels import DiscordWebhookChannel, EmailChannel, WebhookChannel
-        from settings import settings as _settings
+        from settings import get_api_settings
+        _settings = get_api_settings()
+        try:
+            from api.services.notification_channels import DiscordWebhookChannel, EmailChannel, WebhookChannel
+        except ImportError:
+            DiscordWebhookChannel = EmailChannel = WebhookChannel = None
 
         triggered = []
         rules = self.repository.get_enabled_notification_rules()
@@ -138,14 +142,14 @@ class NotificationManager:
                 title = notification["title"]
                 message = notification["message"]
                 metadata = {"rule_id": notification["rule_id"], "link": notification["link"]}
-                if _settings.DISCORD_WEBHOOK_ENABLED and _settings.DISCORD_WEBHOOK_URL:
+                if DiscordWebhookChannel and _settings.DISCORD_WEBHOOK_ENABLED and _settings.DISCORD_WEBHOOK_URL:
                     DiscordWebhookChannel(_settings.DISCORD_WEBHOOK_URL).send(title, message, metadata)
-                if _settings.SMTP_HOST and _settings.SMTP_TO:
+                if EmailChannel and _settings.SMTP_HOST and _settings.SMTP_TO:
                     EmailChannel(
                         _settings.SMTP_HOST, _settings.SMTP_PORT,
                         _settings.SMTP_FROM, _settings.SMTP_TO, _settings.SMTP_PASSWORD
                     ).send(title, message, metadata)
-                if _settings.NOTIFICATION_WEBHOOK_URL:
+                if WebhookChannel and _settings.NOTIFICATION_WEBHOOK_URL:
                     WebhookChannel(_settings.NOTIFICATION_WEBHOOK_URL).send(title, message, metadata)
         return triggered
 
