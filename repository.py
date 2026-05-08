@@ -344,26 +344,6 @@ class Repository(ABC):
         """Upsert API usage count — increments requests_used by 1."""
         ...
 
-    # --- Portfolio Operations ---
-
-    @abstractmethod
-    def get_portfolio_by_user(self, user_id: str) -> dict | None: ...
-
-    @abstractmethod
-    def create_portfolio(self, portfolio: dict) -> None: ...
-
-    @abstractmethod
-    def add_portfolio_holding(self, holding: dict) -> None: ...
-
-    @abstractmethod
-    def delete_portfolio_holding(self, holding_id: str) -> None: ...
-
-    @abstractmethod
-    def get_portfolio_holdings(self, portfolio_id: str) -> list[dict]: ...
-
-    @abstractmethod
-    def update_portfolio_timestamp(self, portfolio_id: str) -> None: ...
-
     # --- Watchlist Operations ---
 
     @abstractmethod
@@ -955,25 +935,6 @@ class SqliteRepository(Repository):
                 )
             """)
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS portfolios (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL DEFAULT 'local',
-                    name TEXT DEFAULT 'My Portfolio',
-                    created_at TEXT,
-                    updated_at TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS portfolio_holdings (
-                    id TEXT PRIMARY KEY,
-                    portfolio_id TEXT NOT NULL,
-                    ticker TEXT NOT NULL,
-                    shares REAL NOT NULL,
-                    cost_basis REAL,
-                    added_at TEXT
-                )
-            """)
-            conn.execute("""
                 CREATE TABLE IF NOT EXISTS watchlists (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL DEFAULT 'local',
@@ -1145,7 +1106,6 @@ class SqliteRepository(Repository):
                 "CREATE INDEX IF NOT EXISTS idx_watchlist_items ON watchlist_items(watchlist_id)",
                 "CREATE INDEX IF NOT EXISTS idx_assignments_doc ON narrative_assignments(doc_id)",
                 "CREATE INDEX IF NOT EXISTS idx_assignments_narrative ON narrative_assignments(narrative_id)",
-                "CREATE INDEX IF NOT EXISTS idx_portfolio_holdings_portfolio ON portfolio_holdings(portfolio_id)",
                 "CREATE INDEX IF NOT EXISTS idx_candidate_buffer_ingested ON candidate_buffer(ingested_at)",
                 # P11c Batch 5: composite indexes for live query shapes
                 "CREATE INDEX IF NOT EXISTS idx_watchlists_user_created ON watchlists(user_id, created_at DESC)",
@@ -1574,9 +1534,9 @@ class SqliteRepository(Repository):
 
             # --- Migration: Remove weak asset links below configured threshold ---
             # Lazy import to avoid any circular-dependency risk at module load
-            # time (get_settings() is a safe singleton — settings.py has no
-            # project-level imports).
-            from settings import get_settings as _get_settings
+            # time; use import-safe settings so template tests can run without
+            # a real Anthropic key.
+            from settings import get_api_settings as _get_settings
             _weak_floor = _get_settings().ASSET_MAPPING_MIN_SIMILARITY
 
             weak_rows = conn.execute(
@@ -2655,58 +2615,6 @@ class SqliteRepository(Repository):
                 datetime.now(timezone.utc).isoformat(),
             ))
 
-    # --- Portfolio Operations ---
-
-    def get_portfolio_by_user(self, user_id: str) -> dict | None:
-        with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM portfolios WHERE user_id = ? LIMIT 1", (user_id,)
-            ).fetchone()
-            return dict(row) if row else None
-
-    def create_portfolio(self, portfolio: dict) -> None:
-        with self._get_conn() as conn:
-            safe_cols = self._sanitize_columns(portfolio.keys())
-            cols = ", ".join(safe_cols)
-            placeholders = ", ".join("?" * len(safe_cols))
-            conn.execute(f"INSERT INTO portfolios ({cols}) VALUES ({placeholders})", list(portfolio.values()))
-
-    def add_portfolio_holding(self, holding: dict) -> None:
-        with self._get_conn() as conn:
-            safe_cols = self._sanitize_columns(holding.keys())
-            cols = ", ".join(safe_cols)
-            placeholders = ", ".join("?" * len(safe_cols))
-            conn.execute(f"INSERT INTO portfolio_holdings ({cols}) VALUES ({placeholders})", list(holding.values()))
-
-    def get_portfolio_holding(self, holding_id: str) -> dict | None:
-        with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT ph.*, p.user_id FROM portfolio_holdings ph "
-                "JOIN portfolios p ON ph.portfolio_id = p.id "
-                "WHERE ph.id = ?",
-                (holding_id,),
-            ).fetchone()
-            return dict(row) if row else None
-
-    def delete_portfolio_holding(self, holding_id: str) -> None:
-        with self._get_conn() as conn:
-            conn.execute("DELETE FROM portfolio_holdings WHERE id = ?", (holding_id,))
-
-    def get_portfolio_holdings(self, portfolio_id: str) -> list[dict]:
-        with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM portfolio_holdings WHERE portfolio_id = ?", (portfolio_id,)
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    def update_portfolio_timestamp(self, portfolio_id: str) -> None:
-        from datetime import datetime, timezone
-        with self._get_conn() as conn:
-            conn.execute(
-                "UPDATE portfolios SET updated_at = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), portfolio_id),
-            )
-
     # --- Watchlist Operations ---
 
     def create_watchlist(self, watchlist: dict) -> None:
@@ -3518,10 +3426,6 @@ class SqliteRepository(Repository):
     def check_all_orphans(self) -> dict[str, dict]:
         """Read-only FK precheck. Returns {relationship: {count, sample_ids}}."""
         checks = [
-            ("portfolio_holdings.portfolio_id -> portfolios.id",
-             "SELECT h.portfolio_id FROM portfolio_holdings h "
-             "LEFT JOIN portfolios p ON h.portfolio_id = p.id "
-             "WHERE p.id IS NULL"),
             ("watchlist_items.watchlist_id -> watchlists.id",
              "SELECT wi.watchlist_id FROM watchlist_items wi "
              "LEFT JOIN watchlists w ON wi.watchlist_id = w.id "
