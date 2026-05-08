@@ -31,11 +31,9 @@ RULE_TYPES = {
     "rsi_overbought": "RSI rises above threshold (default 70)",
     "rsi_oversold": "RSI falls below threshold (default 30)",
     "macd_crossover": "MACD line crosses above signal line (bullish)",
-    "sentiment_spike": "Social sentiment spikes above threshold std deviations",
-    "portfolio_drawdown": "Portfolio drawdown exceeds threshold%",
 }
 
-VALID_TARGET_TYPES = {"narrative", "ticker", "portfolio"}
+VALID_TARGET_TYPES = {"narrative", "ticker"}
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +309,6 @@ class NotificationManager:
                     "Bullish MACD crossover detected",
                     f"/brief/{target_id.upper()}",
                 )]
-
-        elif rule_type in ("sentiment_spike", "portfolio_drawdown"):
-            pass  # Deferred: requires live sentiment / portfolio data pipeline
 
         return []
 
