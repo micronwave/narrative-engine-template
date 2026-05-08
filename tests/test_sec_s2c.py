@@ -94,7 +94,7 @@ os.environ["RATE_LIMIT_ENABLED"] = "0"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from api.main import app  # noqa: E402
-from api.app_legacy import (  # noqa: E402
+from api.main import (  # noqa: E402
     get_current_user,
     get_optional_user,
     STUB_AUTH_TOKEN,
@@ -160,7 +160,7 @@ def _make_jwt_token(
 
 S("H7-struct: HttpOnly cookie source analysis")
 
-_main_src = (Path(__file__).parent.parent / "api" / "app_legacy.py").read_text(encoding="utf-8")
+_main_src = (Path(__file__).parent.parent / "api" / "main.py").read_text(encoding="utf-8")
 
 # Check that set_cookie is called with httponly=True in signup
 _signup_src = _main_src[_main_src.find("def auth_signup("):]

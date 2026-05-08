@@ -85,7 +85,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 from api.main import app  # noqa: E402
-from api.app_legacy import (  # noqa: E402
+from api.main import (  # noqa: E402
     limiter,
     _sse_connections,
     _sse_per_user,
@@ -97,7 +97,7 @@ from api.app_legacy import (  # noqa: E402
 client = TestClient(app)
 
 # Source code for structural checks
-main_py = Path(__file__).parent.parent / "api" / "app_legacy.py"
+main_py = Path(__file__).parent.parent / "api" / "main.py"
 main_source = main_py.read_text(encoding="utf-8")
 llm_source = (Path(__file__).parent.parent / "llm_client.py").read_text(encoding="utf-8")
 repo_source = (Path(__file__).parent.parent / "repository.py").read_text(encoding="utf-8")
@@ -304,8 +304,8 @@ S("C6: SSE tracking variables")
 
 T(
     "_sse_connections importable",
-    "_sse_connections" in dir(sys.modules.get("api.app_legacy", None) or __import__("api.app_legacy")),
-    "variable not found in api.app_legacy",
+    "_sse_connections" in dir(sys.modules.get("api.main", None) or __import__("api.main")),
+    "variable not found in api.main",
 )
 
 T(

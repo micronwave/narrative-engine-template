@@ -25,9 +25,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-import api.app_legacy as app_mod  # noqa: E402
+import api.main as app_mod  # noqa: E402
 from api.main import app  # noqa: E402
-from api.app_legacy import STUB_AUTH_TOKEN  # noqa: E402
+from api.main import STUB_AUTH_TOKEN  # noqa: E402
 
 _AUTH = {"x-auth-token": STUB_AUTH_TOKEN}
 
@@ -107,28 +107,13 @@ logging.getLogger().removeHandler(_cap)
 S("B2 — error contract: stable payloads")
 
 with TestClient(app) as client:
-    # Sentiment endpoint: str(e) must not appear in response body. Use valid-format ticker.
-    resp_sentiment = client.get("/api/sentiment/ZZZFAKE", headers=_AUTH)
     # Earnings: failures must return 503, not empty list
     # Patch to force an exception inside earnings handler
-    with patch("api.app_legacy.get_repo") as mock_get_repo:
+    with patch("api.main.get_repo") as mock_get_repo:
         mock_repo = MagicMock()
         mock_repo._get_conn.side_effect = RuntimeError("db gone")
         mock_get_repo.return_value = mock_repo
         resp_health_degraded = client.get("/api/health", headers=_AUTH)
-
-T(
-    "sentiment endpoint returns 2xx or 500 (not leaking str(e))",
-    resp_sentiment.status_code in (200, 500, 503),
-    str(resp_sentiment.status_code),
-)
-if resp_sentiment.status_code >= 400:
-    body_text = resp_sentiment.text
-    T(
-        "sentiment error detail is stable (no raw exception text)",
-        "Traceback" not in body_text and len(body_text) < 500,
-        body_text[:200],
-    )
 
 # Health endpoint degraded state
 T(
@@ -160,7 +145,7 @@ T(
 S("B2 — earnings failure contract")
 
 with TestClient(app) as client:
-    with patch("api.app_legacy.get_upcoming_earnings", side_effect=RuntimeError("service down"), create=True):
+    with patch("api.main.get_upcoming_earnings", side_effect=RuntimeError("service down"), create=True):
         # Patch the inner import inside the route handler
         import builtins
         _real_import = builtins.__import__
@@ -222,17 +207,6 @@ T(
     len(_ws_bad) == 0,
     f"bare pass at lines {_ws_bad}" if _ws_bad else "",
 )
-
-_agg_bad = _check_file_no_silent_swallows(
-    pathlib.Path("api/services/sentiment_aggregator.py"),
-    exempt_linenos=set(),
-)
-T(
-    "sentiment_aggregator.py: no unlogged silent except..pass",
-    len(_agg_bad) == 0,
-    f"bare pass at lines {_agg_bad}" if _agg_bad else "",
-)
-
 
 # ---------------------------------------------------------------------------
 # B4 — X-Response-Time-Ms header

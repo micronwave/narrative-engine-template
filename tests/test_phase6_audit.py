@@ -51,9 +51,9 @@ def T(name: str, condition: bool, details: str = ""):
 
 
 from repository import SqliteRepository
-from settings import get_settings
+from settings import get_api_settings
 
-settings = get_settings()
+settings = get_api_settings()
 repo = SqliteRepository(settings.DB_PATH)
 repo.migrate()
 
@@ -137,7 +137,7 @@ with TestClient(app) as client:
     T("T4: Admin endpoint returns 200 (no blob crashes)", resp.status_code == 200)
 
     # T5: Verify blob validation exists in source
-    api_src = Path(_ROOT, "api", "app_legacy.py").read_text(encoding="utf-8")
+    api_src = Path(_ROOT, "api", "main.py").read_text(encoding="utf-8")
     has_blob_check = "len(blob) % 4 == 0" in api_src and "len(blob) // 4 >= 768" in api_src
     T("T5: Centroid blob size validation present in API", has_blob_check)
 
@@ -159,7 +159,7 @@ T("T7: Leak indicator returns int", isinstance(leak_val, int), f"value={leak_val
 S("Section D: Cohesion threshold")
 
 pipeline_src = Path(_ROOT, "pipeline.py").read_text(encoding="utf-8")
-api_src = Path(_ROOT, "api", "app_legacy.py").read_text(encoding="utf-8")
+api_src = Path(_ROOT, "api", "main.py").read_text(encoding="utf-8")
 
 _settings_src = Path(_ROOT, "settings.py").read_text(encoding="utf-8")
 # Accept either hardcoded 0.999 literal or settings-based threshold (PIPELINE_EXPORT_COHESION_GATE=0.999)

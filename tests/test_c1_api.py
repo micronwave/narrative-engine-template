@@ -119,10 +119,10 @@ mock_rows = [
     for i in range(1, 10)
 ]
 mock_repo.get_all_active_narratives.return_value = mock_rows
-with patch("api.app_legacy.get_repo_or_fail", return_value=mock_repo), \
-     patch("api.app_legacy._build_signal_lookup", return_value={}), \
+with patch("api.main.get_repo", return_value=mock_repo), \
+     patch("api.main._build_signal_lookup", return_value={}), \
      patch(
-         "api.app_legacy._build_visible_narrative",
+         "api.main._build_visible_narrative",
          side_effect=lambda n, _repo, signal_lookup=None: {
              "id": n["narrative_id"],
              "name": n["name"],
@@ -183,7 +183,7 @@ S("C1-U2: GET /api/ticker structure")
 
 mock_repo_ticker = MagicMock()
 mock_repo_ticker.get_all_active_narratives.return_value = mock_rows[:5]
-with patch("api.app_legacy.get_repo_or_fail", return_value=mock_repo_ticker):
+with patch("api.main.get_repo", return_value=mock_repo_ticker):
     resp = client.get("/api/ticker")
 T("status 200", resp.status_code == 200, f"got {resp.status_code}")
 
