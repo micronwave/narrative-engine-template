@@ -1,12 +1,6 @@
 """
 V3 Phase 2 — Core Features Tests
 
-  V3-PORT-1: GET /api/portfolio returns portfolio (or null)
-  V3-PORT-2: POST /api/portfolio/holdings creates holding and auto-creates portfolio
-  V3-PORT-3: GET /api/portfolio returns the newly added holding
-  V3-PORT-4: GET /api/portfolio/exposure returns exposure list
-  V3-PORT-5: DELETE /api/portfolio/holdings/{id} removes holding
-  V3-PORT-6: Duplicate holding returns already_exists
   V3-TL-1: GET /api/narratives/{id}/timeline returns timeline
   V3-TL-2: Timeline entries have expected fields
   V3-TL-3: GET /api/narratives/{id}/compare returns comparison
@@ -45,51 +39,6 @@ def T(name: str, condition: bool, details: str = ""):
 
 
 client = TestClient(app)
-
-# ===========================================================================
-# Portfolio Tests
-# ===========================================================================
-S("V3-PORT: Portfolio CRUD")
-
-resp = client.get("/api/portfolio")
-T("PORT-1: GET /api/portfolio → 200", resp.status_code == 200)
-data = resp.json()
-T("PORT-1a: has holdings list", isinstance(data.get("holdings"), list))
-
-# Add a holding
-resp = client.post("/api/portfolio/holdings", json={"ticker": "AAPL", "shares": 10})
-T("PORT-2: POST holding → 200", resp.status_code == 200, f"body={resp.json()}")
-add_data = resp.json()
-T("PORT-2a: status is added", add_data.get("status") == "added")
-holding_id = add_data.get("holding_id", "")
-
-# Verify it appears
-resp = client.get("/api/portfolio")
-data = resp.json()
-tickers = [h.get("ticker") for h in data.get("holdings", [])]
-T("PORT-3: AAPL in holdings", "AAPL" in tickers, f"tickers={tickers}")
-
-# Duplicate
-resp = client.post("/api/portfolio/holdings", json={"ticker": "AAPL"})
-T("PORT-6: Duplicate → already_exists", resp.json().get("status") == "already_exists")
-
-# Exposure
-resp = client.get("/api/portfolio/exposure")
-T("PORT-4: GET exposure → 200", resp.status_code == 200)
-exp_data = resp.json()
-T("PORT-4a: has exposures list", isinstance(exp_data.get("exposures"), list))
-
-# Remove
-if holding_id:
-    resp = client.delete(f"/api/portfolio/holdings/{holding_id}")
-    T("PORT-5: DELETE holding → 200", resp.status_code == 200)
-    T("PORT-5a: status removed", resp.json().get("status") == "removed")
-
-# Verify removal
-resp = client.get("/api/portfolio")
-data = resp.json()
-tickers_after = [h.get("ticker") for h in data.get("holdings", [])]
-T("PORT-5b: AAPL removed", "AAPL" not in tickers_after)
 
 
 # ===========================================================================

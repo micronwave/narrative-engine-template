@@ -592,7 +592,6 @@ repo_h, tmp_h = _make_repo()
 try:
     orphans = repo_h.check_all_orphans()
     expected_keys = [
-        "portfolio_holdings.portfolio_id -> portfolios.id",
         "watchlist_items.watchlist_id -> watchlists.id",
         "notifications.rule_id -> notification_rules.id",
         "document_evidence.narrative_id -> narratives.narrative_id",

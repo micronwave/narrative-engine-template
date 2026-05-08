@@ -325,8 +325,6 @@ S("C5: Pre-existing auth endpoints unchanged")
 # These endpoints already had get_optional_user or get_current_user
 _PREEXISTING_AUTH = [
     ("GET", "/api/activity"),
-    ("GET", "/api/portfolio"),
-    ("GET", "/api/portfolio/exposure"),
 ]
 
 for method, path in _PREEXISTING_AUTH:

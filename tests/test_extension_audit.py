@@ -2,15 +2,12 @@
 Extension Module Audit Tests
 
 Tests the fixes from the production code audit of:
-portfolio.py, watchlist.py, notifications.py, export.py
+watchlist.py, notifications.py, export.py
 
 C1: Notification threshold None guard
-C2: Portfolio ns_score None guard
 H1: Notification deduplication
 H2: Notification UTC date
-H3: CSV import row cap
 H4: Notification target_type validation
-M2: Portfolio remove_holding updates timestamp
 M3: Export share_text fallback
 M4: Watchlist duplicate prevention
 M5: Dashboard user_id explicit
@@ -50,44 +47,12 @@ def T(name: str, condition: bool, details: str = ""):
 # ---------------------------------------------------------------------------
 class MockRepository:
     def __init__(self):
-        self.portfolios = {}
-        self.holdings = {}
         self.watchlists = {}
         self.watchlist_items = {}
         self.notification_rules = {}
         self.notifications = {}
         self.narratives = {}
         self.mutations = []
-
-    # --- Portfolio ---
-    def get_portfolio_by_user(self, user_id):
-        for p in self.portfolios.values():
-            if p["user_id"] == user_id:
-                return p
-        return None
-
-    def create_portfolio(self, portfolio):
-        self.portfolios[portfolio["id"]] = portfolio
-
-    def add_portfolio_holding(self, holding):
-        self.holdings[holding["id"]] = holding
-
-    def get_portfolio_holding(self, holding_id):
-        h = self.holdings.get(holding_id)
-        if h:
-            p = self.portfolios.get(h["portfolio_id"])
-            return {**h, "user_id": p["user_id"] if p else "local"}
-        return None
-
-    def delete_portfolio_holding(self, holding_id):
-        self.holdings.pop(holding_id, None)
-
-    def get_portfolio_holdings(self, portfolio_id):
-        return [h for h in self.holdings.values() if h["portfolio_id"] == portfolio_id]
-
-    def update_portfolio_timestamp(self, portfolio_id):
-        if portfolio_id in self.portfolios:
-            self.portfolios[portfolio_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     # --- Narratives ---
     def get_narrative(self, narrative_id):
@@ -189,12 +154,6 @@ class MockRepository:
     def get_narratives_by_date(self, date_str):
         return list(self.narratives.values())
 
-
-class MockStockProvider:
-    def get_quotes_batch(self, tickers, force_refresh=False):
-        return {t: {"price": 150.0, "change_pct": 1.5} for t in tickers}
-
-
 class MockLlmClient:
     def __init__(self, fail=False):
         self.fail = fail
@@ -277,7 +236,7 @@ def test_notifications():
         T("H4-a: Invalid target_type raises ValueError", True, str(e))
 
     T("H4-b: VALID_TARGET_TYPES exported correctly",
-      VALID_TARGET_TYPES == {"narrative", "ticker", "portfolio"})
+      VALID_TARGET_TYPES == {"narrative", "ticker"})
 
     S("P09b — Notification rule lifecycle + read state")
 
@@ -365,81 +324,6 @@ def test_notifications():
         T("C1-e: ns_below with None ns_score does not crash", True)
     except TypeError as e:
         T("C1-e: ns_below with None ns_score does not crash", False, str(e))
-
-
-def test_portfolio():
-    S("C2 — Portfolio ns_score None guard")
-
-    from portfolio import PortfolioManager, MAX_IMPORT_ROWS
-
-    repo = MockRepository()
-    stock = MockStockProvider()
-    pm = PortfolioManager(repo, stock)
-
-    pid = pm.get_or_create_portfolio()
-
-    # Add holding
-    pm.add_holding(pid, "AAPL", 10)
-
-    # Create narrative with None ns_score linked to AAPL
-    nid = str(uuid.uuid4())
-    repo.narratives[nid] = {
-        "narrative_id": nid, "name": "Null Score", "ns_score": None,
-        "stage": None, "linked_assets": '["AAPL"]',
-    }
-
-    try:
-        impact = pm.calculate_impact(pid)
-        T("C2-a: calculate_impact with None ns_score does not crash", True)
-        touching = impact["narratives_touching"]
-        if touching:
-            T("C2-b: ns_score defaults to 0", touching[0]["ns_score"] == 0,
-              f"ns_score={touching[0]['ns_score']}")
-            T("C2-c: stage defaults to Emerging", touching[0]["stage"] == "Emerging",
-              f"stage={touching[0]['stage']}")
-        else:
-            T("C2-b: ns_score defaults to 0", False, "no narratives found")
-            T("C2-c: stage defaults to Emerging", False)
-    except TypeError as e:
-        T("C2-a: calculate_impact with None ns_score does not crash", False, str(e))
-        T("C2-b: ns_score defaults to 0", False)
-        T("C2-c: stage defaults to Emerging", False)
-
-    S("H3 — CSV import row cap")
-
-    # Generate CSV with more than MAX_IMPORT_ROWS
-    lines = ["ticker,shares,cost_basis"]
-    for i in range(MAX_IMPORT_ROWS + 50):
-        lines.append(f"TEST{i},{i + 1},100.00")
-    csv_content = "\n".join(lines)
-
-    result = pm.import_csv(pid, csv_content)
-    T("H3-a: Import capped at MAX_IMPORT_ROWS", result["imported"] == MAX_IMPORT_ROWS,
-      f"imported={result['imported']}")
-    T("H3-b: Cap message in errors", any("capped" in e for e in result["errors"]),
-      f"errors={result['errors'][-1:]}")
-
-    S("M2 — remove_holding updates timestamp")
-
-    pid2 = str(uuid.uuid4())
-    now = "2025-01-01T00:00:00+00:00"
-    repo.portfolios[pid2] = {"id": pid2, "user_id": "local", "name": "Test", "created_at": now, "updated_at": now}
-    hid = pm.add_holding(pid2, "MSFT", 5)
-
-    repo.portfolios[pid2]["updated_at"] = "2025-01-01T00:00:00+00:00"
-    before_ts = repo.portfolios[pid2]["updated_at"]
-    pm.remove_holding(hid)
-    after_ts = repo.portfolios[pid2]["updated_at"]
-    T("M2-a: remove_holding updates portfolio timestamp", after_ts > before_ts,
-      f"before={before_ts}, after={after_ts}")
-
-    # remove_holding with non-existent holding shouldn't crash
-    try:
-        pm.remove_holding("nonexistent-id")
-        T("M2-b: remove non-existent holding does not crash", True)
-    except Exception as e:
-        T("M2-b: remove non-existent holding does not crash", False, str(e))
-
 
 def test_export():
     S("M3 — Export share_text fallback")
@@ -535,7 +419,6 @@ def test_watchlist():
 
 if __name__ == "__main__":
     test_notifications()
-    test_portfolio()
     test_export()
     test_watchlist()
 

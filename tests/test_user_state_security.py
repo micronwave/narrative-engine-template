@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 from api.main import app  # noqa: E402
-from api.app_legacy import get_optional_user  # noqa: E402
-import api.app_legacy as main_mod  # noqa: E402
+from api.main import get_optional_user  # noqa: E402
+import api.main as main_mod  # noqa: E402
 from repository import SqliteRepository  # noqa: E402
 
 _results: list[tuple[str, bool, str]] = []
@@ -113,8 +113,8 @@ try:
             "/api/alerts/rules",
             json={
                 "rule_type": "new_narrative",
-                "target_type": "portfolio",
-                "target_id": "",
+                "target_type": "ticker",
+                "target_id": "AAPL",
                 "threshold": 0.0,
             },
         )
@@ -132,8 +132,8 @@ try:
                 "id": other_rule_id,
                 "user_id": "other-user",
                 "rule_type": "new_narrative",
-                "target_type": "portfolio",
-                "target_id": "",
+                "target_type": "ticker",
+                "target_id": "MSFT",
                 "threshold": 0.0,
                 "enabled": 1,
                 "created_at": now,
@@ -153,13 +153,6 @@ try:
         T("narrative signal includes requested narrative_id", signal_body.get("narrative_id") == "nonexistent-narrative", str(signal_body))
         T("narrative signal returns None when absent", signal_body.get("signal") is None, str(signal_body))
 
-        # Sentiment history endpoint direct coverage.
-        sentiment_resp = client.get("/api/sentiment/AAPL/history?hours=24")
-        T("sentiment history endpoint returns 200", sentiment_resp.status_code == 200, str(sentiment_resp.status_code))
-        sentiment_body = sentiment_resp.json()
-        T("sentiment history includes ticker", sentiment_body.get("ticker") == "AAPL", str(sentiment_body))
-        T("sentiment history includes hours", int(sentiment_body.get("hours", -1)) == 24, str(sentiment_body))
-        T("sentiment history includes data list", isinstance(sentiment_body.get("data"), list), str(sentiment_body))
 finally:
     app.dependency_overrides.pop(get_optional_user, None)
     main_mod.get_repo = orig_get_repo
