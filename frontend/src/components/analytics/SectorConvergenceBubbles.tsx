@@ -4,7 +4,6 @@ import { useEffect, useState, useMemo } from "react";
 import {
   fetchSectorConvergence,
   type AnalyticsSectorResponse,
-  type AnalyticsSectorEntry,
 } from "@/lib/api";
 import { parseDays } from "@/components/analytics/GlobalTimeRange";
 import StageBadge from "@/components/common/StageBadge";

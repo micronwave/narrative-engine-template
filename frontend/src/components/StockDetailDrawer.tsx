@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { X, TrendingUp, TrendingDown, ArrowLeftRight, HelpCircle } from "lucide-react";
-import type { StockDetail, PriceHistoryResponse } from "@/lib/api";
-import { fetchPriceHistory } from "@/lib/api";
+import type { StockDetail } from "@/lib/api";
 import CandlestickChart from "@/components/CandlestickChart";
 import TimeframeSelector from "@/components/TimeframeSelector";
+import { useStockDetailHistory } from "@/hooks/useStockDetailHistory";
 
 type Props = {
   isOpen: boolean;
@@ -30,15 +30,8 @@ function directionColor(direction: string): string {
 
 export default function StockDetailDrawer({ isOpen, stockDetail, loading, onClose }: Props) {
   const drawerRef = useRef<HTMLDivElement>(null);
-  const [priceHistory, setPriceHistory] = useState<PriceHistoryResponse | null>(null);
   const [chartDays, setChartDays] = useState(30);
-
-  useEffect(() => {
-    if (!isOpen || !stockDetail) return;
-    fetchPriceHistory(stockDetail.symbol, chartDays)
-      .then(setPriceHistory)
-      .catch(() => setPriceHistory(null));
-  }, [isOpen, stockDetail, chartDays]);
+  const { priceHistory } = useStockDetailHistory(isOpen, stockDetail?.symbol, chartDays);
 
   // Focus trap + Escape key
   useEffect(() => {
@@ -196,7 +189,7 @@ export default function StockDetailDrawer({ isOpen, stockDetail, loading, onClos
                       <li
                         key={nar.narrative_id}
                         className="py-3"
-                        style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
+                        style={{ borderBottom: "1px solid var(--border-subtle-soft)" }}
                         data-testid={`affecting-narrative-${nar.narrative_id}`}
                       >
                         <a
@@ -236,3 +229,4 @@ export default function StockDetailDrawer({ isOpen, stockDetail, loading, onClos
     </>
   );
 }
+

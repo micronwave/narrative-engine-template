@@ -1,5 +1,6 @@
 import json
 import logging
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -61,22 +62,61 @@ def check_coordination(
         return []
 
     # ------------------------------------------------------------------
-    # Compute pairwise Jaccard similarity for cross-domain document pairs.
+    # Candidate pruning before Jaccard comparisons.
+    # Prefer deduplicator LSH neighbors; fallback to lightweight signature bucket.
     # ------------------------------------------------------------------
     n = len(docs_with_sigs)
     similarity_threshold = settings.LSH_THRESHOLD
+    idx_by_doc_id = {doc.doc_id: idx for idx, doc in enumerate(docs_with_sigs)}
+    candidate_pairs: set[tuple[int, int]] = set()
+    used_lsh_pruning = False
 
+    try:
+        lsh = getattr(deduplicator, "_lsh", None)
+        if lsh is not None and hasattr(lsh, "query"):
+            used_lsh_pruning = True
+            for doc in docs_with_sigs:
+                i = idx_by_doc_id[doc.doc_id]
+                sig_i = batch_signatures[doc.doc_id]
+                neighbors = lsh.query(sig_i) or []
+                for neighbor_doc_id in neighbors:
+                    j = idx_by_doc_id.get(neighbor_doc_id)
+                    if j is None or i == j:
+                        continue
+                    a, b = (i, j) if i < j else (j, i)
+                    candidate_pairs.add((a, b))
+    except Exception as exc:
+        logger.debug("LSH candidate pruning unavailable; falling back to signature buckets: %s", exc)
+        used_lsh_pruning = False
+
+    if not used_lsh_pruning:
+        buckets: dict[tuple[int, ...], list[int]] = {}
+        for i, doc in enumerate(docs_with_sigs):
+            sig = batch_signatures[doc.doc_id]
+            # First 4 MinHash components produce a cheap candidate bucket key.
+            key = tuple(int(x) for x in sig.hashvalues[:4])
+            buckets.setdefault(key, []).append(i)
+        for ids in buckets.values():
+            if len(ids) < 2:
+                continue
+            for pos, i in enumerate(ids):
+                for j in ids[pos + 1:]:
+                    a, b = (i, j) if i < j else (j, i)
+                    candidate_pairs.add((a, b))
+
+    # ------------------------------------------------------------------
+    # Compute Jaccard only for candidate pairs and keep cross-domain matches.
+    # ------------------------------------------------------------------
     similar_pairs: list[tuple[int, int]] = []
-    for i in range(n):
+    for i, j in sorted(candidate_pairs):
         doc_i = docs_with_sigs[i]
+        doc_j = docs_with_sigs[j]
+        if doc_i.source_domain == doc_j.source_domain:
+            continue
         sig_i = batch_signatures[doc_i.doc_id]
-        for j in range(i + 1, n):
-            doc_j = docs_with_sigs[j]
-            if doc_i.source_domain == doc_j.source_domain:
-                continue  # Only flag cross-domain similarity.
-            sig_j = batch_signatures[doc_j.doc_id]
-            if sig_i.jaccard(sig_j) >= similarity_threshold:
-                similar_pairs.append((i, j))
+        sig_j = batch_signatures[doc_j.doc_id]
+        if sig_i.jaccard(sig_j) >= similarity_threshold:
+            similar_pairs.append((i, j))
 
     if not similar_pairs:
         return []
@@ -117,7 +157,7 @@ def check_coordination(
             nid = candidate.get("narrative_id_assigned")
             if nid:
                 doc_id_to_narrative[candidate["doc_id"]] = nid
-    except Exception as exc:
+    except sqlite3.Error as exc:
         logger.warning("Could not load candidate buffer for narrative lookup: %s", exc)
 
     # ------------------------------------------------------------------
@@ -146,7 +186,7 @@ def check_coordination(
                 datetime.fromisoformat(doc.published_at).timestamp()
                 for doc in cluster_docs
             ]
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             logger.warning(
                 "Could not parse published_at for coordination cluster: %s", exc
             )
@@ -229,7 +269,7 @@ def check_coordination(
                         narrative_id,
                         rolling_flags,
                     )
-            except Exception as exc:
+            except sqlite3.Error as exc:
                 logger.warning(
                     "Could not query coordination rolling window for %s: %s",
                     narrative_id,

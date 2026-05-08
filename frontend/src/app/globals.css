@@ -104,6 +104,7 @@
      ============================================ */
   --border-default: var(--bg-border);
   --border-subtle: var(--bg-border);
+  --border-subtle-soft: rgba(56, 62, 71, 0.13);
   --border-strong: var(--bg-subtle);
 
   /* ============================================
@@ -209,25 +210,6 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.02em;
 }
 
-/* Ticker marquee animation */
-@keyframes ticker-scroll {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
-}
-
-.animate-ticker {
-  animation: ticker-scroll 40s linear infinite;
-}
-
-.animate-ticker:hover {
-  animation-play-state: paused;
-}
-
-/* Glass surface — now solid (no backdrop-filter) */
-.glass {
-  background: var(--bg-surface);
-  border: 1px solid var(--bg-border);
-}
 
 /* Shimmer skeleton */
 @keyframes shimmer {
@@ -261,9 +243,6 @@ h1, h2, h3, h4, h5, h6 {
 a { color: inherit; text-decoration: none; }
 
 @layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
   .font-mono-data {
     font-family: var(--font-mono);
     font-weight: 500;
@@ -309,13 +288,6 @@ a { color: inherit; text-decoration: none; }
     font-size: var(--text-label);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--text-muted);
-    font-weight: 500;
-  }
-  .label-small {
-    font-size: var(--text-micro);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
     color: var(--text-muted);
     font-weight: 500;
   }

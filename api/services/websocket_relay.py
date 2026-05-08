@@ -136,8 +136,8 @@ class FinnhubWebSocketRelay:
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("[WS Relay] ws.close() raised %s", type(exc).__name__)
         self._connected = False
         logger.info("[WS Relay] Stopped")
 
@@ -268,5 +268,5 @@ class FinnhubWebSocketRelay:
             if self._update_callback:
                 try:
                     self._update_callback(symbol, float(price), volume, ts_iso)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("[WS Relay] update_callback error for %s: %s", symbol, type(exc).__name__)

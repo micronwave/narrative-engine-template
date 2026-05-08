@@ -4,11 +4,16 @@ import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import type { WidgetType } from "./WidgetCatalog";
 import {
+  fetchAlerts,
+  fetchMarketSentiment,
   fetchNarratives,
+  fetchPortfolioSummary,
   fetchSectorConvergence,
   fetchSignalLeaderboard,
   fetchStocks,
   fetchUpcomingEarnings,
+  fetchWatchlist,
+  type AlertNotification,
   type SignalLeaderboardEntry,
   type Narrative,
 } from "@/lib/api";
@@ -155,7 +160,153 @@ function TopMoversWidget({ compact }: { compact?: boolean }) {
   );
 }
 
-// ─── 4. Market Heatmap ────────────────────────────────────────────────────────
+// ─── 4. Sentiment Meter ───────────────────────────────────────────────────────
+type MarketSentiment = {
+  market_score: number;
+  bullish_pct: number;
+  bearish_pct: number;
+  neutral_pct: number;
+};
+
+function SentimentMeterWidget({ compact }: { compact?: boolean }) {
+  const { data, isLoading } = useQuery<MarketSentiment>({
+    queryKey: ["sentiment-market"],
+    queryFn: fetchMarketSentiment,
+  });
+  if (isLoading) return <LoadingState label="Sentiment Meter" />;
+  const score = data?.market_score ?? 0;
+  const bullish = data?.bullish_pct ?? 0;
+  const bearish = data?.bearish_pct ?? 0;
+  const neutral = data?.neutral_pct ?? 100;
+  const pct = Math.max(0, Math.min(100, Math.round((score + 1) * 50)));
+  const label = score > 0.2 ? "Bullish" : score < -0.2 ? "Bearish" : "Neutral";
+  const labelColor =
+    score > 0.2
+      ? "var(--intent-success)"
+      : score < -0.2
+      ? "var(--intent-danger)"
+      : "var(--text-muted)";
+  return (
+    <div data-testid="widget-body-sentiment_meter" className="p-3 flex flex-col gap-3 h-full">
+      <div>
+        <div className="flex justify-between mb-1">
+          <span className="font-mono text-[10px] text-bearish">Bear</span>
+          <span className="font-mono text-[11px] font-medium" style={{ color: labelColor }}>
+            {label}
+          </span>
+          <span className="font-mono text-[10px] text-bullish">Bull</span>
+        </div>
+        <div className="h-2 rounded-full bg-[var(--bg-border)] overflow-hidden">
+          <div
+            className="h-full rounded-full"
+            style={{ width: `${pct}%`, background: labelColor, transition: "width 0.3s ease" }}
+          />
+        </div>
+      </div>
+      {!compact && (
+        <div className="grid grid-cols-3 gap-1">
+          <div className="text-center">
+            <div className="font-mono text-[12px] text-bullish font-medium">{bullish.toFixed(0)}%</div>
+            <div className="font-mono text-[9px] text-text-muted uppercase tracking-wide">Bull</div>
+          </div>
+          <div className="text-center">
+            <div className="font-mono text-[12px] text-text-muted font-medium">
+              {neutral.toFixed(0)}%
+            </div>
+            <div className="font-mono text-[9px] text-text-muted uppercase tracking-wide">Neutral</div>
+          </div>
+          <div className="text-center">
+            <div className="font-mono text-[12px] text-bearish font-medium">{bearish.toFixed(0)}%</div>
+            <div className="font-mono text-[9px] text-text-muted uppercase tracking-wide">Bear</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── 5. Alert Feed ────────────────────────────────────────────────────────────
+type AlertItem = {
+  id: string;
+  title: string;
+  message: string;
+  is_read: boolean;
+  rule_type?: string;
+};
+
+function AlertFeedWidget({ compact }: { compact?: boolean }) {
+  const { data, isLoading } = useQuery<AlertItem[]>({
+    queryKey: ["alerts-feed"],
+    queryFn: async () => {
+      const alerts: AlertNotification[] = await fetchAlerts();
+      return alerts.map((a) => ({ ...a, is_read: Boolean(a.is_read) }));
+    },
+  });
+  if (isLoading) return <LoadingState label="Alert Feed" />;
+  const alerts = (Array.isArray(data) ? data : [])
+    .filter((a) => !a.is_read)
+    .slice(0, compact ? 3 : 5);
+  return (
+    <div data-testid="widget-body-alert_feed" className="overflow-y-auto h-full p-2">
+      {alerts.length === 0 ? (
+        <div className="font-mono text-[11px] text-text-muted p-2">No unread alerts</div>
+      ) : (
+        alerts.map((a) => (
+          <div key={a.id} className="py-1.5 px-2 border-b border-[var(--bg-border)]">
+            <div className="font-mono text-[11px] text-text-primary truncate">{a.title}</div>
+            {!compact && (
+              <div className="font-mono text-[10px] text-text-muted truncate">{a.message}</div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+// ─── 6. Watchlist ─────────────────────────────────────────────────────────────
+type WatchlistItem = {
+  id: string;
+  item_id: string;
+  item_type: "narrative" | "ticker";
+  name?: string;
+  current_price?: number | null;
+  price_change_24h?: number | null;
+};
+
+function WatchlistWidget({ compact }: { compact?: boolean }) {
+  const { data, isLoading } = useQuery<{ items: WatchlistItem[]; watchlist_id: string | null }>({
+    queryKey: ["watchlist"],
+    queryFn: () => fetchWatchlist() as Promise<{ items: WatchlistItem[]; watchlist_id: string | null }>,
+  });
+  if (isLoading) return <LoadingState label="Watchlist" />;
+  const items = (data?.items ?? []).slice(0, compact ? 3 : 5);
+  return (
+    <div data-testid="widget-body-watchlist" className="overflow-y-auto h-full p-2">
+      {items.length === 0 ? (
+        <div className="font-mono text-[11px] text-text-muted p-2">Nothing in watchlist</div>
+      ) : (
+        items.map((item) => (
+          <div
+            key={item.id}
+            className="py-1.5 px-2 border-b border-[var(--bg-border)] flex items-center justify-between gap-2"
+          >
+            <span className="font-mono text-[11px] text-text-primary truncate">
+              {item.item_type === "ticker" ? item.item_id : (item.name ?? item.item_id)}
+            </span>
+            {item.item_type === "ticker" && item.current_price != null && (
+              <span className="font-mono text-[11px] text-text-muted shrink-0">
+                ${item.current_price.toFixed(2)}
+              </span>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+// ─── 7. Market Heatmap ────────────────────────────────────────────────────────
 function MarketHeatmapWidget({ compact }: { compact?: boolean }) {
   const { data, isLoading } = useQuery<StockItem[]>({
     queryKey: ["stocks-heatmap"],
@@ -208,7 +359,70 @@ function MarketHeatmapWidget({ compact }: { compact?: boolean }) {
   );
 }
 
-// ─── 8. Convergence Radar ─────────────────────────────────────────────────────
+// ─── 8. Portfolio Summary ─────────────────────────────────────────────────────
+type PortfolioSummary = {
+  total_value: number;
+  total_pnl: number;
+  day_change: number;
+  day_change_pct: number;
+  position_count: number;
+};
+
+function PortfolioSummaryWidget({ compact }: { compact?: boolean }) {
+  const { data, isLoading } = useQuery<PortfolioSummary>({
+    queryKey: ["portfolio-summary"],
+    queryFn: fetchPortfolioSummary,
+  });
+  if (isLoading) return <LoadingState label="Portfolio Summary" />;
+  const totalValue = data?.total_value ?? 0;
+  const totalPnl = data?.total_pnl ?? 0;
+  const dayChange = data?.day_change ?? 0;
+  const dayChangePct = data?.day_change_pct ?? 0;
+  const posCount = data?.position_count ?? 0;
+  return (
+    <div data-testid="widget-body-portfolio_summary" className="p-3 grid grid-cols-2 gap-2">
+      <div className="flex flex-col">
+        <span className="font-mono text-[9px] text-text-muted uppercase tracking-wide">Value</span>
+        <span className="font-mono text-[13px] text-text-primary font-medium">
+          ${totalValue.toLocaleString()}
+        </span>
+      </div>
+      <div className="flex flex-col">
+        <span className="font-mono text-[9px] text-text-muted uppercase tracking-wide">P&L</span>
+        <span
+          className={`font-mono text-[13px] font-medium ${
+            totalPnl >= 0 ? "text-bullish" : "text-bearish"
+          }`}
+        >
+          {totalPnl >= 0 ? "+" : ""}${totalPnl.toLocaleString()}
+        </span>
+      </div>
+      {!compact && (
+        <>
+          <div className="flex flex-col">
+            <span className="font-mono text-[9px] text-text-muted uppercase tracking-wide">Day</span>
+            <span
+              className={`font-mono text-[13px] font-medium ${
+                dayChange >= 0 ? "text-bullish" : "text-bearish"
+              }`}
+            >
+              {dayChange >= 0 ? "+" : ""}${dayChange.toFixed(0)} ({dayChangePct >= 0 ? "+" : ""}
+              {dayChangePct.toFixed(1)}%)
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="font-mono text-[9px] text-text-muted uppercase tracking-wide">
+              Positions
+            </span>
+            <span className="font-mono text-[13px] text-text-primary font-medium">{posCount}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── 9. Convergence Radar ─────────────────────────────────────────────────────
 type ConvergenceSector = {
   name: string;
   narrative_count: number;
@@ -298,8 +512,16 @@ function WidgetBody({ type, compact }: { type: WidgetType; compact?: boolean }) 
       return <SignalLeaderboardWidget compact={compact} />;
     case "top_movers":
       return <TopMoversWidget compact={compact} />;
+    case "sentiment_meter":
+      return <SentimentMeterWidget compact={compact} />;
+    case "alert_feed":
+      return <AlertFeedWidget compact={compact} />;
+    case "watchlist":
+      return <WatchlistWidget compact={compact} />;
     case "market_heatmap":
       return <MarketHeatmapWidget compact={compact} />;
+    case "portfolio_summary":
+      return <PortfolioSummaryWidget compact={compact} />;
     case "convergence_radar":
       return <ConvergenceRadarWidget compact={compact} />;
     case "economic_calendar":
@@ -324,7 +546,7 @@ export default function WidgetRenderer({
     >
       <div
         className="flex items-center justify-between px-3 py-2"
-        style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
+        style={{ borderBottom: "1px solid var(--border-subtle-soft)" }}
       >
         <span className="font-mono text-[11px] uppercase tracking-[0.05em] text-text-secondary">
           {title}
@@ -345,3 +567,4 @@ export default function WidgetRenderer({
     </div>
   );
 }
+

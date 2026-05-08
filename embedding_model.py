@@ -3,12 +3,13 @@ import pickle
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from safe_pickle import safe_load
-
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
+
+from safe_pickle import safe_load
+from settings import Settings, settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,18 @@ class EmbeddingModel(ABC):
 
 class MiniLMEmbedder(EmbeddingModel):
 
-    def __init__(self, settings: "Settings") -> None:
+    def __init__(self, settings: Settings = settings) -> None:
         self._model_name: str = settings.EMBEDDING_MODEL_NAME
         self._mode: str = settings.EMBEDDING_MODE
-        self._model = SentenceTransformer(self._model_name)
+        try:
+            self._model = SentenceTransformer(self._model_name)
+        except Exception as exc:
+            logger.warning(
+                "Online model load failed for %s (%s); retrying from local cache only.",
+                self._model_name,
+                exc,
+            )
+            self._model = SentenceTransformer(self._model_name, local_files_only=True)
 
         self._tfidf: TfidfVectorizer | None = None
         self._svd: TruncatedSVD | None = None

@@ -6,6 +6,7 @@ all source URLs for audit purposes.
 
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from output import build_output_object, validate_output, write_outputs
 from repository import SqliteRepository
 from settings import settings
 from signals import (
+    _accept_fallback_ticker,
     compute_cohesion,
     compute_cross_source_score,
     compute_entropy,
@@ -32,10 +34,10 @@ from signals import (
     compute_intent_weight,
     compute_burst_velocity,
     compute_lifecycle_stage,
-    compute_ns_score,
     compute_polarization,
     compute_velocity,
     compute_velocity_windowed,
+    extract_known_tickers,
     format_cycle_slot,
     get_narrative_age_days,
     validate_signal_fields,
@@ -47,6 +49,14 @@ from vector_store import FaissVectorStore
 from prompt_utils import sanitize_for_prompt, strip_control_chars
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_rounded_int(value, default: int = 0) -> int:
+    """Coerce numeric-ish values to a non-negative integer."""
+    try:
+        return max(int(round(float(value))), 0)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +117,7 @@ def check_financial_relevance(
             parsed = json.loads(topic_tags_json) if isinstance(topic_tags_json, str) else topic_tags_json
             has_investable_tag = bool(parsed)
         except (json.JSONDecodeError, TypeError):
-            pass
+            logger.warning("check_financial_relevance: could not parse topic_tags JSON, treating as empty")
 
     return has_financial and has_investable_tag
 
@@ -199,7 +209,8 @@ def _backfill_centroids(
             try:
                 vector_store.add(vec.reshape(1, -1), [nid])
                 backfilled += 1
-            except Exception:
+            except Exception as exc:
+                logger.warning("Vector recovery: add failed for narrative %s: %s", nid, type(exc).__name__)
                 failed_recovery.append(nid)
         else:
             dim_mismatch.append(nid)
@@ -292,8 +303,8 @@ def _load_centroid_history_vecs(
                 v = np.frombuffer(blob, dtype=np.float32).copy()
                 if v.size == emb_dim:
                     vecs.append(v)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Centroid blob deserialization failed for narrative %s: %s", rec.get("narrative_id", "?"), type(exc).__name__)
     return vecs
 
 
@@ -313,16 +324,23 @@ def _handle_failed_labeling_attempt(
     attempts = int(narrative.get("labeling_attempts") or 0) + 1
 
     if attempts >= 3:
+        try:
+            vector_store.delete(narrative_id)
+        except Exception as exc:
+            logger.warning(
+                "Narrative %s not retired: failed to delete centroid after %d failed labeling attempts: %s",
+                narrative_id,
+                attempts,
+                exc,
+            )
+            repository.update_narrative(narrative_id, {"labeling_attempts": attempts})
+            return False
         repository.update_narrative(narrative_id, {
             "stage": "Dormant",
             "labeling_attempts": attempts,
             "description": f"Auto-retired: labeling failed after {attempts} attempts",
             "last_updated_at": now_iso,
         })
-        try:
-            vector_store.delete(narrative_id)
-        except Exception:
-            pass
         logger.warning(
             "Narrative %s retired after %d failed labeling attempts",
             narrative_id, attempts,
@@ -417,6 +435,23 @@ def run() -> None:
         )
         deduplicator.load()  # returns False if not found — fresh init is fine
 
+        # Detect incomplete FAISS+LSH pair from prior cycle
+        _manifest_path = Path(settings.FAISS_INDEX_PATH).with_suffix(".pair_manifest.json")
+        if not _manifest_path.exists() and (
+            Path(settings.FAISS_INDEX_PATH).exists() or Path(settings.LSH_INDEX_PATH).exists()
+        ):
+            logger.warning(
+                "Step 0: no pair manifest found — prior index save may have been incomplete. "
+                "Centroid backfill will recover missing vectors from DB."
+            )
+        elif _manifest_path.exists():
+            try:
+                _manifest = json.loads(_manifest_path.read_text())
+                _expected_cycle = _manifest.get("cycle_id")
+                logger.debug("Loaded index pair manifest from cycle %s", _expected_cycle)
+            except Exception as _mex:
+                logger.warning("Step 0: pair manifest unreadable (%s) — treating as incomplete", _mex)
+
         # SQLite-FAISS consistency check (warn only, no auto-repair)
         db_count = repository.get_narrative_count()
         faiss_count = vector_store.count()
@@ -473,11 +508,11 @@ def run() -> None:
         step_duration = (time.monotonic() - step_start) * 1000
         _log_step(repository, cycle_id, 1, "budget_status", "OK", step_duration)
 
-    except Exception as exc:
+    except (sqlite3.Error, ValueError, TypeError) as exc:
         step_duration = (time.monotonic() - step_start) * 1000
         logger.error("Step 1 (budget status) failed: %s", exc, exc_info=True)
         _log_step(repository, cycle_id, 1, "budget_status", "ERROR", step_duration, str(exc))
-        # Non-fatal: continue
+        # Non-fatal: external data/parsing failure should not abort the whole cycle.
 
     # ------------------------------------------------------------------ #
     # Step 2: Retry Failed Ingestion Jobs                                 #
@@ -495,13 +530,13 @@ def run() -> None:
                 repository.delete_failed_job(job.get("job_id", ""))
                 continue
             retry_count = int(job.get("retry_count") or 0)
-            if retry_count >= 3:
+            if retry_count >= settings.PIPELINE_FAILED_JOB_MAX_RETRIES:
                 continue
             job_id = job.get("job_id") or ""
             source_type = job.get("source_type") or "rss"
             try:
                 if source_type == "rss" and source_url:
-                    ingester = RssIngester(repository, feed_urls=[source_url])
+                    ingester = RssIngester(repository, feed_urls=[source_url], settings=settings)
                     docs = ingester.ingest()
                     if docs:
                         repository.delete_failed_job(job_id)
@@ -535,7 +570,7 @@ def run() -> None:
     step_start = time.monotonic()
     raw_documents: list[RawDocument] = []
     try:
-        ingesters = [RssIngester(repository)]
+        ingesters = [RssIngester(repository, settings=settings)]
         try:
             from api_ingesters import ApiIngestionManager
             ingesters.append(ApiIngestionManager(settings, repository))
@@ -615,13 +650,15 @@ def run() -> None:
             for i, doc in enumerate(surviving_docs):
                 emb = raw_embeddings[i].astype(np.float32)
                 norm = np.linalg.norm(emb)
-                if norm > 0:
-                    emb = emb / norm
+                if norm <= 0.0:
+                    logger.warning("Step 6: zero-norm embedding for doc_id=%s; skipping", doc.doc_id)
+                    continue
                 doc_embeddings[doc.doc_id] = emb
 
             logger.info("Step 6: embedded %d documents (dim=%d)", len(doc_embeddings), emb_dim)
             step_duration = (time.monotonic() - step_start) * 1000
-            _log_step(repository, cycle_id, 6, "embed", "OK", step_duration)
+            _log_step(repository, cycle_id, 6, "embed", "OK", step_duration,
+                      f"docs={len(doc_embeddings)} dim={emb_dim}")
 
         except Exception as exc:
             step_duration = (time.monotonic() - step_start) * 1000
@@ -670,9 +707,13 @@ def run() -> None:
                         ).fetchall()
                     }
 
-                for doc in surviving_docs:
+                _batch_embs = np.stack([doc_embeddings[d.doc_id] for d in surviving_docs])
+                _batch_results = vector_store.batch_search(_batch_embs)
+
+                for doc, (dist, matched_id) in zip(surviving_docs, _batch_results):
                     emb = doc_embeddings[doc.doc_id]
-                    distances, ids = vector_store.search(emb, k=1)
+                    ids = [matched_id] if matched_id is not None else []
+                    distances = np.array([dist])
 
                     if ids and len(distances) > 0 and float(distances[0]) >= floor:
                         narrative_id = ids[0]
@@ -776,22 +817,49 @@ def run() -> None:
         _log_step(repository, cycle_id, 8, "centroid_decay", "OK", step_duration,
                   f"decayed={len(decay_ids)}")
 
-    except Exception as exc:
+    except (sqlite3.Error, ValueError, RuntimeError) as exc:
         step_duration = (time.monotonic() - step_start) * 1000
         logger.error("Step 8 (centroid decay) failed: %s", exc, exc_info=True)
         _log_step(repository, cycle_id, 8, "centroid_decay", "ERROR", step_duration, str(exc))
-        # Non-fatal: continue
+        # Non-fatal: persistence/vector I/O failures are logged and skipped this cycle.
 
     # ------------------------------------------------------------------ #
     # Step 9: Run Clustering                                              #
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
+    selected_batch_size = 0
     try:
         buffer_count = repository.get_candidate_buffer_count(status="pending")
+        selected_batch_size = min(
+            buffer_count,
+            int(getattr(settings, "CLUSTER_MAX_PENDING_BATCH", buffer_count))
+        )
 
         if buffer_count >= settings.NOISE_BUFFER_THRESHOLD:
             new_narrative_ids = run_clustering(repository, vector_store, embedder, settings, llm_client)
-            logger.info("Step 9: clustering produced %d new narratives", len(new_narrative_ids))
+            if buffer_count > settings.NOISE_BUFFER_THRESHOLD * 3:
+                logger.warning(
+                    "Step 9: pending backlog high pending=%d threshold=%d",
+                    buffer_count,
+                    settings.NOISE_BUFFER_THRESHOLD,
+                )
+            if hasattr(repository, "verify_cluster_consistency"):
+                try:
+                    repository.verify_cluster_consistency(set(vector_store.get_all_ids()))
+                except Exception as exc:
+                    logger.warning("Step 9: cluster consistency check failed: %s", exc)
+            logger.info(
+                "Step 9: clustering produced %d new narratives (pending=%d selected_batch=%d)",
+                len(new_narrative_ids),
+                buffer_count,
+                selected_batch_size,
+            )
+            if selected_batch_size > 0 and len(new_narrative_ids) == 0:
+                logger.warning(
+                    "Step 9: selected batch produced zero clusters pending=%d selected_batch=%d",
+                    buffer_count,
+                    selected_batch_size,
+                )
         elif buffer_count > 0:
             logger.info(
                 "Candidate buffer has %d documents, below threshold %d. "
@@ -801,7 +869,7 @@ def run() -> None:
 
         step_duration = (time.monotonic() - step_start) * 1000
         _log_step(repository, cycle_id, 9, "clustering", "OK", step_duration,
-                  f"buffer={buffer_count} new_narratives={len(new_narrative_ids)}")
+                  f"pending={buffer_count} selected_batch={selected_batch_size} new_narratives={len(new_narrative_ids)}")
 
     except Exception as exc:
         step_duration = (time.monotonic() - step_start) * 1000
@@ -846,6 +914,9 @@ def run() -> None:
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
     sweep_merged = 0
+    sweep_pairs = 0
+    sweep_cap_hit = False
+    pair_cap = int(getattr(settings, "PERIODIC_DEDUP_MAX_PAIRS", 20000))
     try:
         with repository._get_conn() as conn:
             run_count = conn.execute(
@@ -853,7 +924,15 @@ def run() -> None:
             ).fetchone()[0]
 
         if run_count > 0 and run_count % 6 == 0:
-            sweep_merged = periodic_narrative_dedup(repository, vector_store)
+            sweep_metrics = periodic_narrative_dedup(
+                repository,
+                vector_store,
+                max_pairs=pair_cap,
+                return_metrics=True,
+            )
+            sweep_merged = int(sweep_metrics.get("merge_count", 0))
+            sweep_pairs = int(sweep_metrics.get("pair_count", 0))
+            sweep_cap_hit = bool(sweep_metrics.get("cap_hit", False))
             if sweep_merged > 0:
                 try:
                     vector_store.save()
@@ -868,6 +947,19 @@ def run() -> None:
                 )
             else:
                 logger.info("Step 9.6: periodic dedup sweep found no merges")
+            logger.info(
+                "Step 9.6: periodic dedup metrics pair_count=%d cap_hit=%s pair_cap=%d run_count=%d",
+                sweep_pairs,
+                sweep_cap_hit,
+                pair_cap,
+                run_count,
+            )
+            if sweep_cap_hit:
+                logger.warning(
+                    "Step 9.6: periodic dedup hit pair cap pair_count=%d pair_cap=%d",
+                    sweep_pairs,
+                    pair_cap,
+                )
         else:
             logger.info("Step 9.6: periodic dedup skipped (run_count=%d)", run_count)
 
@@ -879,7 +971,7 @@ def run() -> None:
             "periodic_dedup",
             "OK",
             step_duration,
-            f"run_count={run_count} merged={sweep_merged}",
+            f"run_count={run_count} merged={sweep_merged} pair_count={sweep_pairs} cap_hit={sweep_cap_hit} pair_cap={pair_cap}",
         )
 
     except Exception as exc:
@@ -901,196 +993,208 @@ def run() -> None:
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
     try:
-        active_narratives = repository.get_all_active_narratives()
+        if not new_narrative_ids:
+            logger.info("Step 10: no new narratives this cycle — skipping stale signal recompute")
+            step_duration = (time.monotonic() - step_start) * 1000
+            _log_step(repository, cycle_id, 10, "compute_signals", "OK", step_duration, "skipped:no_new_narratives")
+        else:
+            active_narratives = repository.get_all_active_narratives()
 
-        # Total unique domains across corpus for cross-source score denominator
-        corpus_domain_count = repository.get_corpus_domain_count()
+            # Total unique domains across corpus for cross-source score denominator
+            corpus_domain_count = repository.get_corpus_domain_count()
 
-        for narrative in active_narratives:
-            narrative_id = narrative["narrative_id"]
-            is_new = narrative_id in new_narrative_ids
+            for narrative in active_narratives:
+                narrative_id = narrative["narrative_id"]
+                is_new = narrative_id in new_narrative_ids
 
-            history_vecs = _load_centroid_history_vecs(
-                repository, narrative_id,
-                days=settings.VELOCITY_WINDOW_DAYS + 1,
-                emb_dim=emb_dim,
-            )
-
-            # First-run guard: new narrative has no meaningful history yet
-            if is_new or len(history_vecs) < 2:
-                velocity = 0.0
-                velocity_windowed = 0.0
-            else:
-                velocity = compute_velocity(history_vecs[0], history_vecs[1])
-                velocity_windowed = compute_velocity_windowed(
-                    history_vecs, settings.VELOCITY_WINDOW_DAYS
+                history_vecs = _load_centroid_history_vecs(
+                    repository, narrative_id,
+                    days=settings.VELOCITY_WINDOW_DAYS + 1,
+                    emb_dim=emb_dim,
                 )
 
-            evidence = repository.get_document_evidence(narrative_id)
-            doc_texts = [e.get("excerpt") or "" for e in evidence]
-            doc_domains = [e.get("source_domain") or "" for e in evidence
-                           if e.get("source_domain")]
-
-            entropy = compute_entropy(doc_texts, settings.ENTROPY_VOCAB_WINDOW) \
-                if doc_texts else None
-            if entropy is None and (narrative.get("stage") or "Emerging") in ("Growing", "Mature"):
-                logger.debug(
-                    "Narrative %s (stage=%s, docs=%d): entropy=None — insufficient financial vocabulary",
-                    narrative_id, narrative.get("stage"), narrative.get("document_count") or 0,
-                )
-            intent_weight = compute_intent_weight(doc_texts) if doc_texts else 0.0
-            cross_source_score = compute_cross_source_score(doc_domains, corpus_domain_count)
-
-            # Phase 2: Source tier escalation + weighted source score
-            escalation = compute_source_escalation(evidence)
-            weighted_src_score = compute_weighted_source_score(evidence, corpus_domain_count)
-
-            # Cohesion/polarization from new embeddings this cycle (if any)
-            new_doc_ids = narrative_assigned_docs.get(narrative_id, [])
-            new_embeddings = [doc_embeddings[did] for did in new_doc_ids
-                              if did in doc_embeddings]
-
-            ema_alpha = settings.COHESION_EMA_ALPHA
-
-            if new_embeddings:
-                old_cohesion = min(1.0, max(0.0, float(narrative.get("cohesion") or 0.0)))
-
-                if len(new_embeddings) < 2:
-                    # compute_cohesion returns 0.0 for <2 embeddings —
-                    # use doc-to-centroid similarity as a proxy instead.
-                    centroid = vector_store.get_vector(narrative_id)
-                    if centroid is not None:
-                        cycle_cohesion = min(1.0, max(0.0, float(
-                            np.dot(new_embeddings[0], centroid)
-                        )))
-                        cohesion = ema_alpha * cycle_cohesion + (1 - ema_alpha) * old_cohesion
-                    else:
-                        cohesion = old_cohesion
+                # First-run guard: new narrative has no meaningful history yet
+                if is_new or len(history_vecs) < 2:
+                    velocity = 0.0
+                    velocity_windowed = 0.0
                 else:
-                    cycle_cohesion = min(1.0, max(0.0, compute_cohesion(new_embeddings)))
-                    if old_cohesion == 0.0 and int(narrative.get("document_count") or 0) == 0:
-                        # Brand new narrative — use raw value
-                        cohesion = cycle_cohesion
-                    else:
-                        # EMA: blend new measurement with historical value
-                        cohesion = ema_alpha * cycle_cohesion + (1 - ema_alpha) * old_cohesion
+                    velocity = compute_velocity(history_vecs[0], history_vecs[1])
+                    velocity_windowed = compute_velocity_windowed(
+                        history_vecs, settings.VELOCITY_WINDOW_DAYS
+                    )
 
-                new_doc_texts = [e.get("excerpt") or "" for e in evidence
-                                 if e.get("doc_id") in set(new_doc_ids)]
-                if len(new_doc_texts) >= 2:
-                    polarization = compute_polarization(new_doc_texts)
+                evidence = repository.get_document_evidence(narrative_id, limit=settings.SIGNAL_EVIDENCE_LIMIT)
+                doc_texts = [e.get("excerpt") or "" for e in evidence]
+                doc_domains = [e.get("source_domain") or "" for e in evidence
+                               if e.get("source_domain")]
+
+                entropy = compute_entropy(doc_texts, settings.ENTROPY_MIN_VOCAB_SIZE) \
+                    if doc_texts else None
+                if entropy is None and (narrative.get("stage") or "Emerging") in ("Growing", "Mature"):
+                    logger.debug(
+                        "Narrative %s (stage=%s, docs=%d): entropy=None — insufficient financial vocabulary",
+                        narrative_id, narrative.get("stage"), narrative.get("document_count") or 0,
+                    )
+                intent_weight = compute_intent_weight(doc_texts) if doc_texts else 0.0
+                cross_source_score = compute_cross_source_score(doc_domains, corpus_domain_count)
+
+                # Phase 2: Source tier escalation + weighted source score
+                escalation = compute_source_escalation(evidence)
+                weighted_src_score = compute_weighted_source_score(evidence, corpus_domain_count)
+
+                # Cohesion/polarization from new embeddings this cycle (if any)
+                new_doc_ids = narrative_assigned_docs.get(narrative_id, [])
+                new_embeddings = [doc_embeddings[did] for did in new_doc_ids
+                                  if did in doc_embeddings]
+
+                ema_alpha = settings.COHESION_EMA_ALPHA
+
+                if new_embeddings:
+                    old_cohesion = min(1.0, max(0.0, float(narrative.get("cohesion") or 0.0)))
+
+                    if len(new_embeddings) < 2:
+                        # compute_cohesion returns 0.0 for <2 embeddings —
+                        # use doc-to-centroid similarity as a proxy instead.
+                        centroid = vector_store.get_vector(narrative_id)
+                        if centroid is not None:
+                            cycle_cohesion = min(1.0, max(0.0, float(
+                                np.dot(new_embeddings[0], centroid)
+                            )))
+                            cohesion = ema_alpha * cycle_cohesion + (1 - ema_alpha) * old_cohesion
+                        else:
+                            cohesion = old_cohesion
+                    else:
+                        cycle_cohesion = min(1.0, max(0.0, compute_cohesion(new_embeddings)))
+                        if old_cohesion == 0.0 and int(narrative.get("document_count") or 0) == 0:
+                            # Brand new narrative — use raw value
+                            cohesion = cycle_cohesion
+                        else:
+                            # EMA: blend new measurement with historical value
+                            cohesion = ema_alpha * cycle_cohesion + (1 - ema_alpha) * old_cohesion
+
+                    new_doc_texts = [e.get("excerpt") or "" for e in evidence
+                                     if e.get("doc_id") in set(new_doc_ids)]
+                    if len(new_doc_texts) >= 2:
+                        polarization = compute_polarization(new_doc_texts)
+                    else:
+                        # <2 docs: insufficient for polarization measurement
+                        polarization = float(narrative.get("polarization") or 0.0)
                 else:
-                    # <2 docs: insufficient for polarization measurement
+                    # No new docs this cycle — retain existing values
+                    cohesion = min(1.0, max(0.0, float(narrative.get("cohesion") or 0.0)))
                     polarization = float(narrative.get("polarization") or 0.0)
-            else:
-                # No new docs this cycle — retain existing values
-                cohesion = min(1.0, max(0.0, float(narrative.get("cohesion") or 0.0)))
-                polarization = float(narrative.get("polarization") or 0.0)
 
-            # document_count: existing count + new assignments this cycle
-            new_assignment_count = len(new_doc_ids)
-            doc_count = int(narrative.get("document_count") or 0) + new_assignment_count
+                # document_count: existing count + new assignments this cycle
+                new_assignment_count = len(new_doc_ids)
+                doc_count = _safe_rounded_int(narrative.get("document_count"), default=0) + new_assignment_count
 
-            # Baseline doc rate (shared by inflow velocity + burst velocity)
-            freq = max(settings.PIPELINE_FREQUENCY_HOURS, 1)
-            cycles_per_day = 24.0 / freq
-            try:
-                baseline_daily = repository.get_baseline_doc_rate(narrative_id, lookback_days=7)
-            except Exception:
-                baseline_daily = 0.0
+                # Baseline doc rate (shared by inflow velocity + burst velocity)
+                freq = max(settings.PIPELINE_FREQUENCY_HOURS, 1)
+                cycles_per_day = 24.0 / freq
+                try:
+                    baseline_daily = repository.get_baseline_doc_rate(narrative_id, lookback_days=7)
+                except Exception as exc:
+                    logger.warning(
+                        "Step 10: baseline doc rate lookup failed for narrative %s; using 0.0 (%s)",
+                        narrative_id,
+                        exc,
+                    )
+                    baseline_daily = 0.0
 
-            # Phase 5: Inflow velocity — document arrival rate relative to 7-day average
-            avg_docs_per_cycle_7d = (baseline_daily / cycles_per_day) if baseline_daily > 0 else float(narrative.get("avg_docs_per_cycle_7d") or 0.0)
-            inflow_vel = compute_inflow_velocity(new_assignment_count, avg_docs_per_cycle_7d)
+                # Phase 5: Inflow velocity — document arrival rate relative to 7-day average
+                avg_docs_per_cycle_7d = (baseline_daily / cycles_per_day) if baseline_daily > 0 else float(narrative.get("avg_docs_per_cycle_7d") or 0.0)
+                inflow_vel = compute_inflow_velocity(new_assignment_count, avg_docs_per_cycle_7d)
 
-            # Sentiment mean/variance and source count for signal validation
-            from signals import compute_sentiment_scores
-            if doc_texts:
-                sent_result = compute_sentiment_scores(doc_texts)
-                sentiment_mean = sent_result["mean"]
-                sentiment_variance = round(sent_result["std"] ** 2, 6)
-            else:
-                sentiment_mean = None
-                sentiment_variance = None
-            source_count = len(set(doc_domains)) if doc_domains else 0
+                # Sentiment mean/variance and source count for signal validation
+                from signals import compute_sentiment_scores
+                if doc_texts:
+                    sent_result = compute_sentiment_scores(doc_texts)
+                    sentiment_mean = sent_result["mean"]
+                    sentiment_variance = round(sent_result["std"] ** 2, 6)
+                else:
+                    sentiment_mean = None
+                    sentiment_variance = None
+                source_count = len(set(doc_domains)) if doc_domains else 0
 
-            repository.update_narrative(narrative_id, {
-                "velocity": velocity,
-                "velocity_windowed": velocity_windowed,
-                "entropy": entropy,
-                "intent_weight": intent_weight,
-                "cross_source_score": cross_source_score,
-                "cohesion": cohesion,
-                "polarization": polarization,
-                "document_count": doc_count,
-                "inflow_velocity": inflow_vel,
-                "avg_docs_per_cycle_7d": avg_docs_per_cycle_7d,
-                "sentiment_mean": sentiment_mean,
-                "sentiment_variance": sentiment_variance,
-                "source_count": source_count,
-                "last_updated_at": now_iso,
-                "source_highest_tier": escalation["highest_tier"],
-                "source_tier_breadth": escalation["tier_breadth"],
-                "source_escalation_velocity": escalation["escalation_velocity"],
-                "source_institutional_pickup": 1 if escalation["is_institutional_pickup"] else 0,
-                "weighted_source_score": weighted_src_score,
-            })
+                repository.update_narrative(narrative_id, {
+                    "velocity": velocity,
+                    "velocity_windowed": velocity_windowed,
+                    "entropy": entropy,
+                    "intent_weight": intent_weight,
+                    "cross_source_score": cross_source_score,
+                    "cohesion": cohesion,
+                    "polarization": polarization,
+                    "document_count": doc_count,
+                    "inflow_velocity": inflow_vel,
+                    "avg_docs_per_cycle_7d": avg_docs_per_cycle_7d,
+                    "sentiment_mean": sentiment_mean,
+                    "sentiment_variance": sentiment_variance,
+                    "source_count": source_count,
+                    "last_updated_at": now_iso,
+                    "pipeline_computed_at": now_iso,
+                    "source_highest_tier": escalation["highest_tier"],
+                    "source_tier_breadth": escalation["tier_breadth"],
+                    "source_escalation_velocity": escalation["escalation_velocity"],
+                    "source_institutional_pickup": 1 if escalation["is_institutional_pickup"] else 0,
+                    "weighted_source_score": weighted_src_score,
+                })
 
-            # F1: Lifecycle stage progression (with hysteresis)
-            age_days = get_narrative_age_days(narrative.get("created_at") or now_iso)
-            cycles_in_stage = int(narrative.get("cycles_in_current_stage") or 0)
-            new_stage = compute_lifecycle_stage(
-                current_stage=narrative.get("stage") or "Emerging",
-                document_count=doc_count,
-                velocity_windowed=velocity_windowed,
-                entropy=entropy,
-                consecutive_declining_cycles=int(narrative.get("consecutive_declining_cycles") or 0),
-                days_since_creation=age_days,
-                cycles_in_current_stage=cycles_in_stage,
-            )
-            if new_stage != (narrative.get("stage") or "Emerging"):
-                repository.update_narrative(narrative_id, {"stage": new_stage, "cycles_in_current_stage": 0})
-                logger.info("Narrative %s stage: %s → %s", narrative_id, narrative.get("stage"), new_stage)
-            else:
-                repository.update_narrative(narrative_id, {"cycles_in_current_stage": cycles_in_stage + 1})
-
-            # F2: Burst velocity — doc ingestion rate acceleration
-            # (reuses baseline_daily + freq + cycles_per_day from inflow velocity above)
-            try:
-                baseline_per_cycle = baseline_daily / cycles_per_day if baseline_daily > 0 else 0.0
-                # Fallback: established narrative with docs but no snapshot history
-                if baseline_per_cycle <= 0 and doc_count > 0:
-                    baseline_per_cycle = max(doc_count / (7.0 * cycles_per_day), 1.0)
-                burst = compute_burst_velocity(
-                    recent_doc_count=new_assignment_count,
-                    baseline_docs_per_window=baseline_per_cycle,
-                    alert_ratio=settings.BURST_VELOCITY_ALERT_RATIO,
+                # F1: Lifecycle stage progression (with hysteresis)
+                age_days = get_narrative_age_days(narrative.get("created_at") or now_iso)
+                cycles_in_stage = int(narrative.get("cycles_in_current_stage") or 0)
+                new_stage = compute_lifecycle_stage(
+                    current_stage=narrative.get("stage") or "Emerging",
+                    document_count=doc_count,
+                    velocity_windowed=velocity_windowed,
+                    entropy=entropy,
+                    consecutive_declining_cycles=int(narrative.get("consecutive_declining_cycles") or 0),
+                    days_since_creation=age_days,
+                    cycles_in_current_stage=cycles_in_stage,
                 )
-                repository.update_narrative(narrative_id, {"burst_ratio": burst["ratio"]})
-                if burst["is_burst"]:
-                    logger.warning("[BURST] Narrative '%s' — %.1fx normal rate",
-                                   narrative.get("name", narrative_id), burst["ratio"])
-            except Exception as exc:
-                logger.debug("Burst velocity skipped for %s: %s", narrative_id, exc)
+                if new_stage != (narrative.get("stage") or "Emerging"):
+                    repository.update_narrative(narrative_id, {"stage": new_stage, "cycles_in_current_stage": 0})
+                    logger.info("Narrative %s stage: %s → %s", narrative_id, narrative.get("stage"), new_stage)
+                else:
+                    repository.update_narrative(narrative_id, {"cycles_in_current_stage": cycles_in_stage + 1})
 
-            # V3: Public interest indicator
-            try:
-                from signals import compute_public_interest
-                reddit_doc_count = sum(1 for e in evidence if (e.get("source_type") or "").lower() == "reddit")
-                public_interest = compute_public_interest(
-                    cross_source_score=cross_source_score,
-                    cross_source_prev=float(narrative.get("cross_source_score") or 0.0),
-                    doc_count=doc_count,
-                    doc_count_prev=int(narrative.get("document_count") or 0),
-                    reddit_doc_count=reddit_doc_count,
-                )
-                repository.update_narrative(narrative_id, {"public_interest": public_interest})
-            except Exception as exc:
-                logger.debug("Public interest skipped for %s: %s", narrative_id, exc)
+                # F2: Burst velocity — doc ingestion rate acceleration
+                # (reuses baseline_daily + freq + cycles_per_day from inflow velocity above)
+                try:
+                    baseline_per_cycle = baseline_daily / cycles_per_day if baseline_daily > 0 else 0.0
+                    # Fallback: established narrative with docs but no snapshot history
+                    if baseline_per_cycle <= 0 and doc_count > 0:
+                        baseline_per_cycle = max(doc_count / (7.0 * cycles_per_day), 1.0)
+                    burst = compute_burst_velocity(
+                        recent_doc_count=new_assignment_count,
+                        baseline_docs_per_window=baseline_per_cycle,
+                        alert_ratio=settings.BURST_VELOCITY_ALERT_RATIO,
+                    )
+                    repository.update_narrative(narrative_id, {"burst_ratio": burst["ratio"]})
+                    if burst["is_burst"]:
+                        logger.warning("[BURST] Narrative '%s' — %.1fx normal rate",
+                                       narrative.get("name", narrative_id), burst["ratio"])
+                except Exception as exc:
+                    logger.debug("Burst velocity skipped for %s: %s", narrative_id, exc)
 
-        logger.info("Step 10: signals computed for %d active narratives", len(active_narratives))
-        step_duration = (time.monotonic() - step_start) * 1000
-        _log_step(repository, cycle_id, 10, "compute_signals", "OK", step_duration)
+                # V3: Public interest indicator
+                try:
+                    from signals import compute_public_interest
+                    reddit_doc_count = sum(1 for e in evidence if (e.get("source_type") or "").lower() == "reddit")
+                    public_interest = compute_public_interest(
+                        cross_source_score=cross_source_score,
+                        cross_source_prev=float(narrative.get("cross_source_score") or 0.0),
+                        doc_count=doc_count,
+                        doc_count_prev=int(narrative.get("document_count") or 0),
+                        reddit_doc_count=reddit_doc_count,
+                    )
+                    repository.update_narrative(narrative_id, {"public_interest": public_interest})
+                except Exception as exc:
+                    logger.debug("Public interest skipped for %s: %s", narrative_id, exc)
+
+            logger.info("Step 10: signals computed for %d active narratives", len(active_narratives))
+            step_duration = (time.monotonic() - step_start) * 1000
+            _log_step(repository, cycle_id, 10, "compute_signals", "OK", step_duration,
+                      f"narratives={len(active_narratives)} evidence_limit={settings.SIGNAL_EVIDENCE_LIMIT}")
 
     except Exception as exc:
         step_duration = (time.monotonic() - step_start) * 1000
@@ -1108,7 +1212,7 @@ def run() -> None:
         if len(active_narratives) < 2:
             logger.info("Step 11: fewer than 2 active narratives — skipping centrality")
             for n in active_narratives:
-                repository.update_narrative(n["narrative_id"], {"centrality": 0.0})
+                repository.update_narrative(n["narrative_id"], {"centrality": 0.0, "is_catalyst": 0})
         else:
             # Re-run centroid backfill immediately before graph construction so
             # narratives that lost their vector store entry after startup are
@@ -1127,7 +1231,11 @@ def run() -> None:
                 vector_store,
                 unrecoverable_missing_ids=unrecoverable_missing_ids,
             )
-            centrality_scores = compute_centrality(graph)
+            centrality_scores = compute_centrality(
+                graph,
+                exact_max_nodes=settings.CENTRALITY_EXACT_MAX_NODES,
+                approx_k=settings.CENTRALITY_APPROX_K,
+            )
             catalyst_ids = set(flag_catalysts(centrality_scores))
 
             for n in active_narratives:
@@ -1156,7 +1264,8 @@ def run() -> None:
                 )
 
         step_duration = (time.monotonic() - step_start) * 1000
-        _log_step(repository, cycle_id, 11, "centrality", "OK", step_duration)
+        _log_step(repository, cycle_id, 11, "centrality", "OK", step_duration,
+                  f"narratives={len(active_narratives)}")
 
     except Exception as exc:
         step_duration = (time.monotonic() - step_start) * 1000
@@ -1171,19 +1280,14 @@ def run() -> None:
     try:
         active_narratives = repository.get_all_active_narratives()
 
-        # Clear stale convergence data before full recompute
-        repository.clear_ticker_convergences()
-
         convergences = compute_all_convergences(
             active_narratives, repository, vector_store,
         )
 
-        for ticker, conv_data in convergences.items():
-            repository.upsert_ticker_convergence({
-                "ticker": ticker,
-                "computed_at": datetime.now(timezone.utc).isoformat(),
-                **conv_data,
-            })
+        # Atomic replace: only clears existing rows after computation succeeds
+        now_conv = datetime.now(timezone.utc).isoformat()
+        tagged = {t: {"computed_at": now_conv, **d} for t, d in convergences.items()}
+        repository.replace_ticker_convergences(tagged)
 
         # Propagate convergence_exposure to each narrative:
         # max(pressure_score) across all tickers the narrative is linked to.
@@ -1333,11 +1437,11 @@ def run() -> None:
         _log_step(repository, cycle_id, 13, "adversarial", "OK", step_duration,
                   f"events={len(adversarial_events)}")
 
-    except Exception as exc:
+    except (sqlite3.Error, ValueError) as exc:
         step_duration = (time.monotonic() - step_start) * 1000
         logger.error("Step 13 (adversarial) failed: %s", exc, exc_info=True)
         _log_step(repository, cycle_id, 13, "adversarial", "ERROR", step_duration, str(exc))
-        # Non-fatal: continue
+        # Non-fatal: repository/parse issues in adversarial checks are tolerated.
 
     # ------------------------------------------------------------------ #
     # Step 14: Dispatch Haiku — Labeling and Lifecycle Classification     #
@@ -1373,7 +1477,7 @@ def run() -> None:
                 # try/except, skipping every subsequent narrative.  This was the root
                 # cause of 64 zombie narratives (name IS NULL) accumulating over time.
                 try:
-                    evidence = repository.get_document_evidence(narrative_id)
+                    evidence = repository.get_document_evidence(narrative_id, limit=settings.SIGNAL_EVIDENCE_LIMIT)
                     # Sanitize excerpts: strip control chars + format markers
                     sanitized_excerpts = []
                     for e in evidence[:5]:
@@ -1487,7 +1591,7 @@ def run() -> None:
                             signal_is_stale = True
 
                     if signal_is_stale:
-                        sa_evidence = repository.get_document_evidence(narrative_id)
+                        sa_evidence = repository.get_document_evidence(narrative_id, limit=settings.SIGNAL_EVIDENCE_LIMIT)
                         sa_excerpts = []
                         for e in sa_evidence[:5]:
                             excerpt = (e.get("excerpt") or "")[:200]
@@ -1589,13 +1693,14 @@ def run() -> None:
                     narrative_id, consecutive_declining, ns_current,
                 )
                 updates["suppressed"] = 1
-                repository.update_narrative(narrative_id, updates)
                 try:
                     vector_store.delete(narrative_id)
                 except Exception as del_exc:
                     logger.warning(
                         "Could not delete FAISS vector for %s: %s", narrative_id, del_exc
                     )
+                    continue
+                repository.update_narrative(narrative_id, updates)
                 continue
 
             repository.update_narrative(narrative_id, updates)
@@ -1643,7 +1748,12 @@ def run() -> None:
                 continue
 
             if ns_score >= settings.CONFIDENCE_ESCALATION_THRESHOLD or narrative_id in mutation_qualified_ids:
-                evidence = repository.get_document_evidence(narrative_id)
+                mutation_triggered = narrative_id in mutation_qualified_ids
+                skip_ns_gate = (
+                    mutation_triggered
+                    and ns_score < settings.CONFIDENCE_ESCALATION_THRESHOLD
+                )
+                evidence = repository.get_document_evidence(narrative_id, limit=settings.SIGNAL_EVIDENCE_LIMIT)
                 sa_excerpts_mut = []
                 for e in evidence[:10]:
                     excerpt = (e.get("excerpt") or "")[:300]
@@ -1657,7 +1767,11 @@ def run() -> None:
                     "Identify key mutations, theme shifts, and emerging sub-themes. "
                     f"Be concise (max 200 words):\n\n{excerpt_text}"
                 )
-                result = llm_client.call_sonnet(narrative_id, mutation_prompt)
+                result = llm_client.call_sonnet(
+                    narrative_id,
+                    mutation_prompt,
+                    skip_ns_gate=skip_ns_gate,
+                )
                 if result is not None:
                     mutation_analyses[narrative_id] = result
                     sonnet_count += 1
@@ -1682,8 +1796,22 @@ def run() -> None:
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
     try:
+        _manifest_path = Path(settings.FAISS_INDEX_PATH).with_suffix(".pair_manifest.json")
+        _manifest_path.unlink(missing_ok=True)  # remove any prior complete marker
         vector_store.save()
         deduplicator.save()
+        # Write pair-commit manifest only after both saves succeed
+        _manifest = {
+            "cycle_id": cycle_id,
+            "faiss_path": settings.FAISS_INDEX_PATH,
+            "lsh_path": settings.LSH_INDEX_PATH,
+            "faiss_mtime": Path(settings.FAISS_INDEX_PATH).stat().st_mtime
+            if Path(settings.FAISS_INDEX_PATH).exists() else None,
+            "lsh_mtime": Path(settings.LSH_INDEX_PATH).stat().st_mtime
+            if Path(settings.LSH_INDEX_PATH).exists() else None,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _manifest_path.write_text(json.dumps(_manifest))
         logger.info("Step 17: FAISS and LSH indices persisted")
         step_duration = (time.monotonic() - step_start) * 1000
         _log_step(repository, cycle_id, 17, "persist_indices", "OK", step_duration)
@@ -1726,7 +1854,7 @@ def run() -> None:
         for narrative in non_suppressed:
             narrative_id = narrative["narrative_id"]
 
-            evidence = repository.get_document_evidence(narrative_id)
+            evidence = repository.get_document_evidence(narrative_id, limit=settings.SIGNAL_EVIDENCE_LIMIT)
             supporting_evidence = [
                 {
                     "source_url": e.get("source_url") or "",
@@ -1748,17 +1876,29 @@ def run() -> None:
                 sector_map=SECTOR_MAP,
             ) if centroid_vec is not None else []
 
-            # Fallback: when embedding similarity misses, scan evidence text for explicit
-            # ticker mentions against the known-ticker whitelist.
+            # Fallback: when embedding similarity misses, scan evidence text for strong
+            # explicit ticker mentions. Accept $TICKER, (TICKER) with optional whitespace,
+            # or a plain uppercase ticker seen in at least two distinct excerpts.
             if not linked_assets and evidence:
-                from signals import extract_known_tickers
-                evidence_text = " ".join(
-                    (e.get("excerpt") or "")[:200] for e in evidence[:10]
-                )
-                fallback_tickers = extract_known_tickers(evidence_text)
+                evidence_excerpts = [
+                    (e.get("excerpt") or "")[:200]
+                    for e in evidence[:10]
+                ]
+                evidence_text = " ".join(evidence_excerpts)
+                fallback_tickers = [
+                    t for t in extract_known_tickers(evidence_text)
+                    if _accept_fallback_ticker(evidence_excerpts, t)
+                ]
                 if fallback_tickers:
                     linked_assets = [
-                        {"ticker": t, "asset_name": t, "similarity_score": 0.0, "source": "text_mention"}
+                        {
+                            "ticker": t,
+                            "asset_name": t,
+                            "similarity_score": 0.0,
+                            "source": "text_mention",
+                            "match_source": "text_mention",
+                            "confidence_type": "mention",
+                        }
                         for t in fallback_tickers
                     ]
                     logger.info(
@@ -1946,6 +2086,24 @@ def run() -> None:
         # Non-fatal: continue to cleanup
 
     # ------------------------------------------------------------------ #
+    # Step 19.7: Check Notification Rules                                #
+    # ------------------------------------------------------------------ #
+    step_start = time.monotonic()
+    try:
+        from notifications import NotificationManager
+        notif_manager = NotificationManager(repository)
+        triggered = notif_manager.check_rules()
+        step_duration = (time.monotonic() - step_start) * 1000
+        logger.info("Step 19.7: checked notification rules, triggered=%d", len(triggered))
+        _log_step(repository, cycle_id, 197, "check_notifications", "OK", step_duration,
+                  f"triggered={len(triggered)}")
+    except Exception as exc:
+        step_duration = (time.monotonic() - step_start) * 1000
+        logger.warning("Step 19.7 (check_notifications) failed: %s", exc)
+        _log_step(repository, cycle_id, 197, "check_notifications", "ERROR", step_duration, str(exc))
+        # Non-fatal: continue to cleanup
+
+    # ------------------------------------------------------------------ #
     # Step 19.8: Outbound posting retired (Phase 3 revamp)                #
     # ------------------------------------------------------------------ #
     step_start = time.monotonic()
@@ -2007,7 +2165,8 @@ def run() -> None:
         # Singletons: suspiciously high cohesion and low doc count
         singleton_count = sum(
             1 for n in active_narratives
-            if (n.get("cohesion") or 0) >= 0.999 and (n.get("document_count") or 0) <= 5
+            if (n.get("cohesion") or 0) >= settings.PIPELINE_EXPORT_COHESION_GATE
+            and (n.get("document_count") or 0) <= settings.PIPELINE_EXPORT_MAX_DOC_COUNT
         )
 
         # Leak indicator: suppressed narratives still receiving documents
@@ -2095,7 +2254,7 @@ def run_light() -> dict:
     deduplicator.load()
 
     # Step 1: Ingest
-    ingester = RssIngester(repository)
+    ingester = RssIngester(repository, settings=settings)
     raw_docs = ingester.ingest()
 
     # Reddit is handled by ApiIngestionManager in the main run() path.

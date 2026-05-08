@@ -12,6 +12,10 @@ import NarrativeChangelog from "@/components/NarrativeChangelog";
 import AffectedAssets from "@/components/AffectedAssets";
 import StageBadge from "@/components/common/StageBadge";
 import MetricTooltip from "@/components/common/MetricTooltip";
+import DeepAnalysisSection from "@/components/narrative/DeepAnalysisSection";
+import StructuredAIAnalysisSection from "@/components/narrative/StructuredAIAnalysisSection";
+import SignalIntelligenceSection from "@/components/narrative/SignalIntelligenceSection";
+import { CatalystsSection, CoordinationRiskSection, EvidenceSection, MarketImpactSection, SourceCoverageSection } from "./components/NarrativeDetailSections";
 
 export default function NarrativeDetailPage() {
   const params = useParams();
@@ -273,125 +277,8 @@ export default function NarrativeDetailPage() {
           </section>
         )}
 
-        {/* V3 1.1: Deep Analysis (Sonnet) */}
-        {narrative.sonnet_analysis && (
-          <section className="mb-10">
-            <div className="flex items-baseline gap-3 mb-4">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-                Deep Analysis
-              </h2>
-              <span className="font-mono text-[11px] text-text-muted">AI · Sonnet</span>
-            </div>
-            <div
-              className="font-display text-[13px] text-text-secondary leading-[1.7] border-l-[3px] pl-5"
-              style={{ borderColor: "var(--vel-accelerating)" }}
-            >
-              {narrative.sonnet_analysis}
-            </div>
-          </section>
-        )}
-
-        {/* Phase 3 Batch 3: AI Deep Analysis (Haiku, structured) */}
-        {analysis && (
-          <section className="mb-10" data-testid="deep-analysis-section">
-            <div className="flex items-baseline gap-3 mb-4">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-                AI Analysis
-              </h2>
-              <span className="font-mono text-[11px] text-text-muted">
-                Haiku {analysis.cached ? "· cached" : "· fresh"} · {new Date(analysis.analyzed_at).toLocaleDateString()}
-              </span>
-              {analysis.cached && (
-                <button
-                  onClick={() => handleAnalyze(true)}
-                  className="font-mono text-[10px] text-accent-text hover:text-text-primary transition-colors"
-                  data-testid="refresh-analysis-btn"
-                >
-                  Refresh
-                </button>
-              )}
-            </div>
-
-            {/* Thesis */}
-            <div
-              className="font-display text-[13px] text-text-secondary leading-[1.7] border-l-[3px] pl-5 mb-6"
-              style={{ borderColor: "var(--accent-primary)" }}
-              data-testid="analysis-thesis"
-            >
-              {analysis.thesis}
-            </div>
-
-            {/* Key Drivers */}
-            {analysis.key_drivers.length > 0 && (
-              <div className="mb-4">
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-2 tracking-[0.06em]">
-                  Key Drivers
-                </div>
-                <ul className="flex flex-col gap-1">
-                  {analysis.key_drivers.map((d, i) => (
-                    <li
-                      key={i}
-                      className="font-mono text-[12px] text-text-secondary pl-3 border-l"
-                      style={{ borderColor: "var(--bg-border)" }}
-                    >
-                      {d}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Asset Impact */}
-            {analysis.asset_impact.length > 0 && (
-              <div className="mb-4">
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-2 tracking-[0.06em]">
-                  Asset Impact
-                </div>
-                {analysis.asset_impact.map((a, i) => (
-                  <div
-                    key={i}
-                    className="flex gap-2 py-1"
-                    style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
-                  >
-                    <span className="font-mono text-[12px] text-text-primary font-semibold shrink-0">
-                      {a.asset}
-                    </span>
-                    <span className="font-mono text-[11px] text-text-secondary">
-                      {a.impact}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Risk Factors */}
-            {analysis.risk_factors.length > 0 && (
-              <div className="mb-4">
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-2 tracking-[0.06em]">
-                  Risk Factors
-                </div>
-                <ul className="flex flex-col gap-1">
-                  {analysis.risk_factors.map((r, i) => (
-                    <li
-                      key={i}
-                      className="font-mono text-[12px] text-text-secondary pl-3 border-l"
-                      style={{ borderColor: "var(--intent-danger)" }}
-                    >
-                      {r}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Historical Comparison */}
-            {analysis.historical_comparison && (
-              <div className="mt-4 font-mono text-[11px] text-text-muted italic">
-                {analysis.historical_comparison}
-              </div>
-            )}
-          </section>
-        )}
+        <DeepAnalysisSection sonnetAnalysis={narrative.sonnet_analysis} />
+        <StructuredAIAnalysisSection analysis={analysis} onRefresh={() => handleAnalyze(true)} />
 
         {/* Analysis error */}
         {analyzeError && !analysis && (
@@ -404,177 +291,11 @@ export default function NarrativeDetailPage() {
           </div>
         )}
 
-        {/* V3 1.3: Market Impact — correlations */}
-        {correlations.length > 0 && (
-          <section className="mb-10">
-            <div className="flex items-baseline gap-3 mb-4">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-                Market Impact
-              </h2>
-              <span className="font-mono text-[11px] text-text-muted">velocity-price correlation</span>
-            </div>
-            <div className="flex flex-col">
-              {correlations.slice(0, 5).map((c) => (
-                <div
-                  key={c.ticker}
-                  className="flex items-center justify-between py-2.5 px-0 transition-colors hover:bg-[var(--accent-primary-hover)]"
-                  style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
-                >
-                  <span className="font-mono text-[13px] font-semibold text-text-primary">
-                    {c.ticker}
-                  </span>
-                  <MetricTooltip metricKey="correlation">
-                    <span
-                      className="font-mono text-[18px] font-bold"
-                      style={{
-                        color: Math.abs(c.correlation) < 0.1 ? "var(--text-muted)" : c.correlation > 0 ? "var(--vel-accelerating)" : "var(--vel-decelerating)",
-                      }}
-                    >
-                      r={c.correlation > 0 ? "+" : ""}{c.correlation.toFixed(3)}
-                    </span>
-                  </MetricTooltip>
-                  <span className="font-mono text-[10px] text-text-muted">
-                    {c.interpretation}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+        <MarketImpactSection correlations={correlations} />
 
-        {/* V3 1.4: Source Coverage */}
-        {sources.length > 0 && (
-          <section className="mb-10">
-            <div className="flex items-baseline gap-3 mb-4">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-                Source Coverage
-              </h2>
-              <span className="font-mono text-[11px] text-text-muted">
-                {sources.length} source{sources.length !== 1 ? "s" : ""} · {sources.reduce((s, d) => s + d.count, 0)} articles
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              {sources.slice(0, 10).map((s) => (
-                <div key={s.domain} className="flex items-center gap-2">
-                  <span className="font-mono text-[11px] text-text-secondary w-[160px] truncate shrink-0">
-                    {s.domain}
-                  </span>
-                  <div className="flex-1 h-1.5 bg-[var(--bg-surface-hover)] overflow-hidden">
-                    <div className="h-full bg-[var(--vel-stable)]" style={{ width: `${Math.min(s.percentage, 100)}%` }} />
-                  </div>
-                  <span className="font-mono text-[10px] text-text-muted w-[50px] text-right shrink-0">
-                    {s.count} ({s.percentage}%)
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+        <SourceCoverageSection sources={sources} />
 
-        {/* Phase 1: Structured Signal Panel */}
-        {narrative.signal && (
-          <section className="mb-10" data-testid="signal-panel">
-            <div className="flex items-baseline gap-3 mb-4">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-                Signal Intelligence
-              </h2>
-              <span className="font-mono text-[11px] text-text-muted">
-                {narrative.signal.certainty} · {narrative.signal.timeframe.replace(/_/g, " ")}
-              </span>
-            </div>
-
-            {/* Direction — primary indicator */}
-            <div className="flex items-center gap-4 mb-4">
-              <div
-                className="font-mono text-[22px] font-bold uppercase"
-                style={{
-                  color: narrative.signal.direction === "bullish" ? "var(--bullish)"
-                       : narrative.signal.direction === "bearish" ? "var(--bearish)"
-                       : "var(--text-muted)",
-                }}
-              >
-                {narrative.signal.direction}
-              </div>
-              {narrative.signal.catalyst_type && narrative.signal.catalyst_type !== "unknown" && (
-                <span
-                  style={{
-                    fontSize: 9,
-                    fontFamily: "var(--font-mono)",
-                    padding: "1px 5px",
-                    borderRadius: "var(--radius-badge)",
-                    border: "1px solid var(--bg-border)",
-                    color: "var(--text-muted)",
-                    letterSpacing: "0.3px",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  {narrative.signal.catalyst_type}
-                </span>
-              )}
-            </div>
-
-            {/* Confidence bar */}
-            <div className="mb-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-mono text-[10px] uppercase text-text-muted">Confidence</span>
-                <span className="font-mono text-[11px] text-text-primary">
-                  {((narrative.signal.confidence ?? 0) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="h-1.5 bg-[var(--bg-surface-hover)]">
-                <div
-                  className="h-full"
-                  style={{
-                    width: `${(narrative.signal.confidence ?? 0) * 100}%`,
-                    background: narrative.signal.direction === "bullish" ? "var(--bullish)"
-                               : narrative.signal.direction === "bearish" ? "var(--bearish)"
-                               : "var(--text-muted)",
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Metadata row */}
-            <div className="flex gap-6 mb-4">
-              <div>
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-1">Certainty</div>
-                <div className="font-mono text-[12px] text-text-primary">{narrative.signal.certainty}</div>
-              </div>
-              <div>
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-1">Timeframe</div>
-                <div className="font-mono text-[12px] text-text-primary">{narrative.signal.timeframe.replace(/_/g, " ")}</div>
-              </div>
-              <div>
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-1">Magnitude</div>
-                <div className="font-mono text-[12px] text-text-primary">{narrative.signal.magnitude}</div>
-              </div>
-            </div>
-
-            {/* Key actors */}
-            {(narrative.signal.key_actors ?? []).length > 0 && (
-              <div className="mb-3">
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-1.5">Key Actors</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {(narrative.signal.key_actors ?? []).map((actor) => (
-                    <span key={actor} className="label-topic">{actor}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Affected sectors */}
-            {(narrative.signal.affected_sectors ?? []).length > 0 && (
-              <div className="mb-3">
-                <div className="font-mono text-[10px] uppercase text-text-muted mb-1.5">Affected Sectors</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {(narrative.signal.affected_sectors ?? []).map((sector) => (
-                    <span key={sector} className="label-topic">{sector}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </section>
-        )}
+        <SignalIntelligenceSection signal={narrative.signal} />
 
         {/* Legacy sentiment fallback — shown only when no signal data */}
         {!narrative.signal && narrative.sentiment && narrative.sentiment.count > 0 && (
@@ -612,31 +333,7 @@ export default function NarrativeDetailPage() {
           </section>
         )}
 
-        {/* V3 1.2: Coordination Risk */}
-        {narrative.coordination && (narrative.coordination.is_coordinated || narrative.coordination.events.length > 0) && (
-          <section className="mb-10">
-            <div className="flex items-baseline gap-3 mb-4">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-                Coordination Risk
-              </h2>
-              <span className="font-mono text-[11px] text-text-muted">adversarial detection</span>
-            </div>
-            <div className="font-mono text-[11px]" style={{ color: narrative.coordination.is_coordinated ? "var(--intent-danger)" : "var(--text-muted)" }}>
-              {narrative.coordination.is_coordinated
-                ? `Coordinated activity detected — ${narrative.coordination.flags} flag(s)`
-                : "No coordination signals detected"}
-            </div>
-            {narrative.coordination.events.length > 0 && (
-              <div className="mt-3 font-mono text-[11px] text-text-muted">
-                {narrative.coordination.events.map((e, i) => (
-                  <div key={i} className="py-1" style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}>
-                    {e.event_type} — {e.detected_at}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
+        <CoordinationRiskSection coordination={narrative.coordination} />
 
         {/* V3: Key Metrics Row */}
         <section className="mb-10">
@@ -671,77 +368,9 @@ export default function NarrativeDetailPage() {
           </div>
         </section>
 
-        {/* Signals */}
-        <section className="mb-10">
-          <div className="flex items-baseline gap-3 mb-4">
-            <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-              Evidence
-            </h2>
-            <span className="font-mono text-[11px] text-text-muted">{narrative.signals.length} signals</span>
-          </div>
-          {narrative.signals.length === 0 ? (
-            <p className="font-mono text-[12px] text-text-muted">
-              No evidence signals available.
-            </p>
-          ) : (
-            <div className="flex flex-col">
-              {narrative.signals.slice(0, 10).map((sig) => (
-                <div
-                  key={sig.id}
-                  className="py-2.5 hover:bg-[var(--accent-primary-hover)] transition-colors duration-[120ms]"
-                  style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
-                >
-                  <p className="text-text-primary text-[13px] line-clamp-2">
-                    {sig.headline}
-                  </p>
-                  <div className="flex items-center gap-2 mt-1 text-text-muted text-[11px] font-mono">
-                    <span>{sig.source.name}</span>
-                    <span>·</span>
-                    <span>
-                      {sig.timestamp
-                        ? new Date(sig.timestamp).toLocaleDateString()
-                        : ""}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        <EvidenceSection signals={narrative.signals} />
 
-        {/* Catalysts */}
-        <section className="mb-10">
-          <div className="flex items-baseline gap-3 mb-4">
-            <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-text-secondary">
-              Catalysts
-            </h2>
-            <span className="font-mono text-[11px] text-text-muted">{narrative.catalysts.length} detected</span>
-          </div>
-          {narrative.catalysts.length === 0 ? (
-            <p className="font-mono text-[12px] text-text-muted">No catalysts detected.</p>
-          ) : (
-            <div className="flex flex-col">
-              {narrative.catalysts.map((cat) => (
-                <div
-                  key={cat.id}
-                  className="py-2.5 border-l-2 border-l-alert pl-4 hover:bg-[var(--accent-primary-hover)] transition-colors duration-[120ms]"
-                  style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
-                >
-                  <p className="text-alert text-[13px]">{cat.description}</p>
-                  <div className="flex items-center gap-2 mt-1 text-text-muted text-[11px] font-mono">
-                    <span>impact {cat.impact_score.toFixed(2)}</span>
-                    <span>·</span>
-                    <span>
-                      {cat.timestamp
-                        ? new Date(cat.timestamp).toLocaleDateString()
-                        : ""}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        <CatalystsSection catalysts={narrative.catalysts} />
 
         {/* Changelog — Phase 3 Batch 3 */}
         <section className="mb-10">
@@ -774,3 +403,4 @@ export default function NarrativeDetailPage() {
     </main>
   );
 }
+

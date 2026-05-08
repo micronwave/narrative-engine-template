@@ -31,18 +31,20 @@ export default function MiniAreaChart({ data, color, width = 220, height = 90 }:
   const chartW = width - padX * 2;
   const chartH = height - padTop - padBottom;
 
-  if (!data || data.length < 2) return null;
+  const hasEnoughData = Array.isArray(data) && data.length >= 2;
 
-  const values = data.map((d) => d.value);
+  const values = hasEnoughData ? data.map((d) => d.value) : [0, 0];
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = max - min || 1;
 
-  const points = data.map((d, i) => ({
+  const points = (hasEnoughData ? data : []).map((d, i) => ({
     x: padX + (i / (data.length - 1)) * chartW,
     y: padTop + chartH - ((d.value - min) / range) * chartH,
     ...d,
   }));
+
+  if (!hasEnoughData || points.length < 2) return null;
 
   // SVG path for the line
   const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
@@ -89,7 +91,7 @@ export default function MiniAreaChart({ data, color, width = 220, height = 90 }:
         {/* Data points (small dots) */}
         {points.map((p, i) => (
           <circle
-            key={i}
+            key={`${p.date}-${i}`}
             cx={p.x}
             cy={p.y}
             r={hoverIdx === i ? 3.5 : 1.5}
@@ -115,7 +117,7 @@ export default function MiniAreaChart({ data, color, width = 220, height = 90 }:
         {/* X-axis day labels */}
         {points.map((p, i) => (
           <text
-            key={`label-${i}`}
+            key={`label-${p.date}-${i}`}
             x={p.x}
             y={height - 2}
             textAnchor="middle"

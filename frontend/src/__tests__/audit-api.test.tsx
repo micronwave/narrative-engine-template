@@ -8,21 +8,25 @@
  *   A-URL-1: fetchNarrativeDetail encodes path-traversal ID
  *   A-URL-2: fetchStockDetail encodes symbol with slash
  *   A-URL-3: fetchBrief encodes ticker with path traversal
- *   A-URL-4: compareNarrativeSnapshots encodes date params via URLSearchParams
  *   A-URL-5: fetchCorrelation encodes both narrativeId and ticker
+ *   A-URL-6: removeFromWatchlist encodes itemId
+ *   A-URL-7: deleteAlertRule encodes ruleId
+ *   A-URL-8: toggleAlertRule encodes ruleId
+ *   A-URL-9: markAlertRead encodes notificationId
  *   A-URL-10: exportNarrative encodes narrative ID
  *   A-URL-11: fetchNarrativeManipulation encodes narrative ID
  *   A-URL-12: fetchNarrativeHistory encodes narrative ID
  *   A-URL-13: fetchPriceHistory encodes symbol
- *   A-URL-14: fetchNarrativeCoordination encodes narrative ID
  *   A-URL-15: fetchNarrativeCorrelations encodes narrative ID
  *   A-URL-16: fetchNarrativeSources encodes narrative ID
- *   A-URL-17: fetchNarrativeDocuments encodes narrative ID
- *   A-URL-19: fetchNarrativeTimeline encodes narrative ID
+ *   A-URL-18: removePortfolioHolding encodes holdingId
  *   A-URL-20: analyzeNarrative encodes narrative ID
  *   A-URL-21: fetchNarrativeAssets encodes narrative ID
  *
  * Error Handling:
+ *   A-ERR-1: markAlertRead throws on non-ok response
+ *   A-ERR-2: markAllAlertsRead throws on non-ok response
+ *   A-ERR-3: fetchAlertCount returns { unread: 0 } on failure (documented fallback)
  *   A-ERR-4: fetchUpcomingEarnings returns [] on failure (documented fallback)
  *   A-ERR-5: All standard fetch functions throw on non-ok response
  *
@@ -43,7 +47,6 @@
  * Adversarial:
  *   A-ADV-1: Narrative ID with "../" is encoded, not traversed
  *   A-ADV-2: Ticker with query injection (?foo=bar) is encoded
- *   A-ADV-3: Date params with ampersand injection are encoded by URLSearchParams
  *   A-ADV-4: Empty string ID is still encoded and sent (no silent skip)
  */
 
@@ -85,19 +88,22 @@ import {
   fetchNarrativeDetail,
   fetchStockDetail,
   fetchBrief,
-  compareNarrativeSnapshots,
   fetchCorrelation,
+  removeFromWatchlist,
+  deleteAlertRule,
+  toggleAlertRule,
+  markAlertRead,
+  markAllAlertsRead,
   exportNarrative,
   fetchNarrativeManipulation,
   fetchNarrativeHistory,
   fetchPriceHistory,
-  fetchNarrativeCoordination,
   fetchNarrativeCorrelations,
   fetchNarrativeSources,
-  fetchNarrativeDocuments,
-  fetchNarrativeTimeline,
+  removePortfolioHolding,
   analyzeNarrative,
   fetchNarrativeAssets,
+  fetchAlertCount,
   fetchUpcomingEarnings,
   fetchStocks,
   fetchManipulation,
@@ -108,9 +114,16 @@ import {
   fetchAssetClasses,
   fetchSecurities,
   fetchActivity,
+  fetchWatchlist,
+  addToWatchlist,
+  createAlertRule,
+  fetchAlertRules,
   fetchCoordinationSummary,
   fetchCorrelationMatrix,
   fetchBufferStatus,
+  fetchPortfolio,
+  addPortfolioHolding,
+  fetchPortfolioExposure,
   fetchMomentumLeaderboard,
   fetchNarrativeHistories,
   fetchNarrativeOverlap,
@@ -119,6 +132,8 @@ import {
   fetchLeadTimeDistribution,
   fetchContrarianSignals,
   setApiToken,
+  fetchAuthMe,
+  logoutAuthSession,
 } from "../lib/api";
 
 import { COLORS } from "../lib/colors";
@@ -154,15 +169,6 @@ describe("URL encoding — path parameters", () => {
     expect(url).toBe(`/api/brief/${encodeURIComponent(DANGEROUS_ID)}`);
   });
 
-  test("A-URL-4: compareNarrativeSnapshots encodes date params via URLSearchParams", async () => {
-    mockOk({});
-    const maliciousDate = "2024-01-01&injected=true";
-    await compareNarrativeSnapshots("n1", maliciousDate, "2024-01-02");
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).not.toContain("&injected=true&");
-    expect(url).toContain(encodeURIComponent("n1"));
-  });
-
   test("A-URL-5: fetchCorrelation encodes both narrativeId and ticker", async () => {
     mockOk({});
     await fetchCorrelation(DANGEROUS_ID, QUERY_INJECT, 3);
@@ -170,6 +176,34 @@ describe("URL encoding — path parameters", () => {
     expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
     expect(url).toContain(encodeURIComponent(QUERY_INJECT));
     expect(url).toContain("lead_days=3");
+  });
+
+  test("A-URL-6: removeFromWatchlist encodes itemId", async () => {
+    mockOk({});
+    await removeFromWatchlist(DANGEROUS_ID);
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
+  });
+
+  test("A-URL-7: deleteAlertRule encodes ruleId", async () => {
+    mockOk({});
+    await deleteAlertRule(DANGEROUS_ID);
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
+  });
+
+  test("A-URL-8: toggleAlertRule encodes ruleId", async () => {
+    mockOk({});
+    await toggleAlertRule(DANGEROUS_ID);
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
+  });
+
+  test("A-URL-9: markAlertRead encodes notificationId", async () => {
+    mockOk();
+    await markAlertRead(DANGEROUS_ID);
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
   });
 
   test("A-URL-10: exportNarrative encodes narrative ID", async () => {
@@ -200,13 +234,6 @@ describe("URL encoding — path parameters", () => {
     expect(url).toContain(encodeURIComponent(SLASH_SYMBOL));
   });
 
-  test("A-URL-14: fetchNarrativeCoordination encodes narrative ID", async () => {
-    mockOk({});
-    await fetchNarrativeCoordination(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
   test("A-URL-15: fetchNarrativeCorrelations encodes narrative ID", async () => {
     mockOk([]);
     await fetchNarrativeCorrelations(DANGEROUS_ID);
@@ -221,16 +248,9 @@ describe("URL encoding — path parameters", () => {
     expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
   });
 
-  test("A-URL-17: fetchNarrativeDocuments encodes narrative ID", async () => {
-    mockOk({ items: [], total: 0, limit: 10, offset: 0 });
-    await fetchNarrativeDocuments(DANGEROUS_ID);
-    const url = mockFetch.mock.calls[0][0] as string;
-    expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
-  });
-
-  test("A-URL-19: fetchNarrativeTimeline encodes narrative ID", async () => {
-    mockOk({ narrative_id: "x", timeline: [] });
-    await fetchNarrativeTimeline(DANGEROUS_ID);
+  test("A-URL-18: removePortfolioHolding encodes holdingId", async () => {
+    mockOk({});
+    await removePortfolioHolding(DANGEROUS_ID);
     const url = mockFetch.mock.calls[0][0] as string;
     expect(url).toContain(encodeURIComponent(DANGEROUS_ID));
   });
@@ -255,6 +275,22 @@ describe("URL encoding — path parameters", () => {
 // ---------------------------------------------------------------------------
 
 describe("Error handling", () => {
+  test("A-ERR-1: markAlertRead throws on non-ok response", async () => {
+    mockFail(500);
+    await expect(markAlertRead("abc")).rejects.toThrow("mark alert read failed: 500");
+  });
+
+  test("A-ERR-2: markAllAlertsRead throws on non-ok response", async () => {
+    mockFail(500);
+    await expect(markAllAlertsRead()).rejects.toThrow("mark all alerts read failed: 500");
+  });
+
+  test("A-ERR-3: fetchAlertCount returns { unread: 0 } on failure", async () => {
+    mockFail(500);
+    const result = await fetchAlertCount();
+    expect(result).toEqual({ unread: 0 });
+  });
+
   test("A-ERR-4: fetchUpcomingEarnings returns [] on failure", async () => {
     mockFail(500);
     const result = await fetchUpcomingEarnings();
@@ -303,6 +339,28 @@ describe("Error handling", () => {
     await expect(fetchActivity()).rejects.toThrow("activity fetch failed: 500");
   });
 
+  test("A-ERR-5m: fetchWatchlist throws on 500", async () => {
+    mockFail(500);
+    await expect(fetchWatchlist()).rejects.toThrow("watchlist fetch failed: 500");
+  });
+
+  test("A-ERR-5n: addToWatchlist throws on 400", async () => {
+    mockFail(400);
+    await expect(addToWatchlist("narrative", "id")).rejects.toThrow("watchlist add failed: 400");
+  });
+
+  test("A-ERR-5o: createAlertRule throws on 400", async () => {
+    mockFail(400);
+    await expect(createAlertRule("burst", "narrative", "n1")).rejects.toThrow(
+      "alert rule create failed: 400"
+    );
+  });
+
+  test("A-ERR-5p: fetchAlertRules throws on 500", async () => {
+    mockFail(500);
+    await expect(fetchAlertRules()).rejects.toThrow("alert rules fetch failed: 500");
+  });
+
   test("A-ERR-5q: fetchCoordinationSummary throws on 500", async () => {
     mockFail(500);
     await expect(fetchCoordinationSummary()).rejects.toThrow("coordination summary failed: 500");
@@ -316,6 +374,21 @@ describe("Error handling", () => {
   test("A-ERR-5s: fetchBufferStatus throws on 500", async () => {
     mockFail(500);
     await expect(fetchBufferStatus()).rejects.toThrow("buffer status failed: 500");
+  });
+
+  test("A-ERR-5t: fetchPortfolio throws on 500", async () => {
+    mockFail(500);
+    await expect(fetchPortfolio()).rejects.toThrow("portfolio fetch failed: 500");
+  });
+
+  test("A-ERR-5u: addPortfolioHolding throws on 400", async () => {
+    mockFail(400);
+    await expect(addPortfolioHolding("AAPL")).rejects.toThrow("holding add failed: 400");
+  });
+
+  test("A-ERR-5v: fetchPortfolioExposure throws on 500", async () => {
+    mockFail(500);
+    await expect(fetchPortfolioExposure()).rejects.toThrow("exposure fetch failed: 500");
   });
 
   test("A-ERR-5w: fetchMomentumLeaderboard throws on 500", async () => {
@@ -466,14 +539,6 @@ describe("Adversarial inputs", () => {
     expect(url).toContain(encodeURIComponent("AAPL?admin=true&drop=table"));
   });
 
-  test("A-ADV-3: date params with ampersand injection are safely encoded", async () => {
-    mockOk({});
-    await compareNarrativeSnapshots("n1", "2024-01-01&admin=true", "2024-12-31");
-    const url = mockFetch.mock.calls[0][0] as string;
-    // URLSearchParams encodes & as %26 in values
-    expect(url).not.toMatch(/&admin=true/);
-  });
-
   test("A-ADV-4: empty string ID is encoded and sent", async () => {
     mockOk({});
     await fetchNarrativeDetail("");
@@ -523,5 +588,25 @@ describe("Auth headers", () => {
     const opts = mockFetch.mock.calls[0][1] as RequestInit;
     const headers = (opts.headers as Record<string, string>) || {};
     expect(headers["x-auth-token"]).toBeUndefined();
+  });
+
+  test("fetchAuthMe calls /api/auth/me with credentials include", async () => {
+    mockOk({ auth_mode: "stub", user: { id: "u1" } });
+    const result = await fetchAuthMe();
+    const url = mockFetch.mock.calls[0][0] as string;
+    const opts = mockFetch.mock.calls[0][1] as RequestInit;
+    expect(url).toBe("/api/auth/me");
+    expect(opts.credentials).toBe("include");
+    expect(result).toEqual({ auth_mode: "stub", user: { id: "u1" } });
+  });
+
+  test("logoutAuthSession calls /api/auth/logout with POST and credentials include", async () => {
+    mockOk({ ok: true });
+    await logoutAuthSession();
+    const url = mockFetch.mock.calls[0][0] as string;
+    const opts = mockFetch.mock.calls[0][1] as RequestInit;
+    expect(url).toBe("/api/auth/logout");
+    expect(opts.method).toBe("POST");
+    expect(opts.credentials).toBe("include");
   });
 });

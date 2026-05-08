@@ -78,7 +78,7 @@ T("ns_score in [0, 1]", 0.0 <= ns_normal <= 1.0, f"ns={ns_normal}")
 T("ns_score > 0", ns_normal > 0.0, f"ns={ns_normal}")
 
 # ===========================================================================
-# F7-U4: invalid lifecycle stage returns input unchanged
+# F7-U4: invalid lifecycle stage returns safe default (Emerging) with a warning
 # ===========================================================================
 S("F7-U4: invalid lifecycle stage passthrough")
 result = compute_lifecycle_stage(
@@ -86,7 +86,7 @@ result = compute_lifecycle_stage(
     velocity_windowed=0.05, entropy=1.0,
     consecutive_declining_cycles=0, days_since_creation=5,
 )
-T("returns 'InvalidStage' unchanged", result == "InvalidStage", f"got {result}")
+T("unknown stage defaults to Emerging", result == "Emerging", f"got {result}")
 
 # Valid stages still work (non-regression)
 result2 = compute_lifecycle_stage(

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { ShieldAlert, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { fetchManipulation } from "@/lib/api";
 import type { ManipulationIndicator, ManipulationNarrative } from "@/lib/api";

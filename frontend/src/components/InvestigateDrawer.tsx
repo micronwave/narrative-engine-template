@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { fetchNarrativeDetail, type NarrativeDetail } from "@/lib/api";
+import type { NarrativeDetail } from "@/lib/api";
 import VelocitySparkline from "./VelocitySparkline";
+import { useNarrativeInvestigation } from "@/hooks/useNarrativeInvestigation";
 
 type Props = {
   narrativeId: string | null;
@@ -22,36 +23,16 @@ type Props = {
 export default function InvestigateDrawer({ narrativeId, onClose }: Props) {
   const drawerRef = useRef<HTMLDivElement>(null);
 
-  const [data, setData] = useState<NarrativeDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  const { data, loading, error: fetchError } = useNarrativeInvestigation(narrativeId);
+  const [sourceRows, setSourceRows] = useState<Array<NarrativeDetail["signals"][number]["source"]>>([]);
 
   useEffect(() => {
-    if (!narrativeId) {
-      setData(null);
-      setFetchError(null);
+    if (!data) {
+      setSourceRows([]);
       return;
     }
-
-    let cancelled = false;
-    setLoading(true);
-    setFetchError(null);
-
-    fetchNarrativeDetail(narrativeId)
-      .then((detail) => {
-        if (!cancelled) setData(detail);
-      })
-      .catch((err) => {
-        if (!cancelled) setFetchError((err as Error).message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [narrativeId]);
+    setSourceRows(Array.from(new Map(data.signals.map((s) => [s.source.id, s.source])).values()));
+  }, [data]);
 
   // Focus trap + Escape key
   useEffect(() => {
@@ -196,7 +177,7 @@ export default function InvestigateDrawer({ narrativeId, onClose }: Props) {
                       <li
                         key={sig.id}
                         className="py-2"
-                        style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
+                        style={{ borderBottom: "1px solid var(--border-subtle-soft)" }}
                       >
                         <p className="text-text-primary text-xs font-medium leading-snug line-clamp-2">
                           {sig.headline || "(no headline)"}
@@ -220,11 +201,7 @@ export default function InvestigateDrawer({ narrativeId, onClose }: Props) {
                     Sources
                   </p>
                   <ul className="flex flex-col gap-1">
-                    {Array.from(
-                      new Map(
-                        data.signals.map((s) => [s.source.id, s.source])
-                      ).values()
-                    ).map((src) => (
+                    {sourceRows.map((src) => (
                       <li
                         key={src.id}
                         className="flex items-center justify-between text-xs"
@@ -293,3 +270,4 @@ export default function InvestigateDrawer({ narrativeId, onClose }: Props) {
     </>
   );
 }
+

@@ -4,7 +4,6 @@ import { useEffect, useState, useMemo } from "react";
 import {
   fetchLeadTimeDistribution,
   type AnalyticsLeadTimeResponse,
-  type AnalyticsLeadTimeBucket,
   type AnalyticsLeadTimeDataPoint,
 } from "@/lib/api";
 import { parseDays } from "@/components/analytics/GlobalTimeRange";

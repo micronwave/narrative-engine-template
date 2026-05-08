@@ -184,12 +184,18 @@ def compute_all_convergences(
             if nid not in ticker_narratives[ticker]:
                 ticker_narratives[ticker][nid] = n
 
-    # Prefetch all signals in one pass
+    # Prefetch all signals in one pass.
+    # If prefetch fails, continue in explicit degraded mode (empty signals map)
+    # so per-ticker convergence still computes from topology/direction data.
     try:
         all_signals = repository.get_all_narrative_signals()
-    except Exception:
-        all_signals = []
-    signals_map = {s["narrative_id"]: s for s in all_signals}
+        signals_map = {s["narrative_id"]: s for s in all_signals}
+    except Exception as exc:
+        logger.warning(
+            "Convergence signal prefetch failed; using degraded empty-signal mode: %s",
+            exc,
+        )
+        signals_map = {}
 
     # Compute convergence for tickers with 2+ narratives
     results: dict[str, dict] = {}

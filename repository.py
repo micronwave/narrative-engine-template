@@ -76,8 +76,8 @@ class Repository(ABC):
     # --- Candidate Buffer Operations ---
 
     @abstractmethod
-    def get_candidate_buffer(self, status: str = "pending") -> list[dict]:
-        """Get all candidates with the given status."""
+    def get_candidate_buffer(self, status: str = "pending", limit: int | None = None) -> list[dict]:
+        """Get candidates with the given status, oldest-first, optionally bounded."""
         ...
 
     @abstractmethod
@@ -408,7 +408,7 @@ class Repository(ABC):
     def get_notifications(self, user_id: str, unread_only: bool = False) -> list[dict]: ...
 
     @abstractmethod
-    def mark_notification_read(self, notification_id: str) -> None: ...
+    def mark_notification_read(self, notification_id: str, user_id: str | None = None) -> None: ...
 
     @abstractmethod
     def mark_all_notifications_read(self, user_id: str) -> None: ...
@@ -583,8 +583,23 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    def get_all_narrative_signals(self) -> list[dict]:
-        """Get all signal extractions."""
+    def get_all_narrative_signals(self, *, limit: int = 0, offset: int = 0) -> list[dict]:
+        """Get signal extractions. limit=0 means unbounded (internal use only)."""
+        ...
+
+    @abstractmethod
+    def get_narratives_by_ids(self, ids: list[str]) -> dict[str, dict]:
+        """Bulk fetch narratives by ID list. Returns {narrative_id: row_dict}."""
+        ...
+
+    @abstractmethod
+    def get_adversarial_events_for_narratives(self, ids: list[str], limit_per: int = 10) -> dict[str, list]:
+        """Bulk fetch adversarial events keyed by narrative_id."""
+        ...
+
+    @abstractmethod
+    def get_snapshot_history_for_narratives(self, ids: list[str], days: int = 90) -> dict[str, list]:
+        """Bulk fetch snapshot history keyed by narrative_id."""
         ...
 
     # --- Convergence Operations ---
@@ -613,6 +628,19 @@ class Repository(ABC):
     def clear_ticker_convergences(self) -> None:
         """Delete all ticker convergence records (used before full recompute)."""
         ...
+
+    @abstractmethod
+    def replace_ticker_convergences(self, convergences: dict[str, dict]) -> None:
+        """Replace all ticker convergence rows atomically inside one transaction."""
+        ...
+
+    def check_all_orphans(self) -> dict[str, dict]:
+        """Read-only precheck: returns orphan counts/samples for FK relationships.
+
+        Returns a dict keyed by relationship name with 'count' and 'sample_ids'.
+        Run this before any FK shadow-table migration to verify data integrity.
+        """
+        raise NotImplementedError
 
     # --- Impact Score Operations (Phase 6) ---
 
@@ -711,8 +739,6 @@ class Repository(ABC):
 
 
 class SqliteRepository(Repository):
-    # TODO SCALE: swap SqliteRepository for PostgresRepository (psycopg2) on AWS RDS — interface is identical
-
     _SAFE_COL_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
     def __init__(self, db_path: str) -> None:
@@ -730,7 +756,7 @@ class SqliteRepository(Repository):
     def _get_conn(self):
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
@@ -742,12 +768,19 @@ class SqliteRepository(Repository):
             conn.close()
 
     def migrate(self) -> None:
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         with self._get_conn() as conn:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
+                _log.info("migrate: journal_mode=WAL")
             except sqlite3.OperationalError:
-                conn.execute("PRAGMA journal_mode=OFF")
-            conn.execute("PRAGMA busy_timeout=5000")
+                try:
+                    conn.execute("PRAGMA journal_mode=DELETE")
+                    _log.warning("migrate: WAL unavailable; journal_mode=DELETE")
+                except sqlite3.OperationalError as exc:
+                    raise RuntimeError("migrate: cannot set WAL or DELETE journal mode") from exc
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS narratives (
                     narrative_id TEXT PRIMARY KEY,
@@ -1083,6 +1116,10 @@ class SqliteRepository(Repository):
                 conn.execute("ALTER TABLE narratives ADD COLUMN burst_ratio REAL DEFAULT NULL")
             except Exception:
                 pass
+            try:
+                conn.execute("ALTER TABLE narratives ADD COLUMN pipeline_computed_at TEXT DEFAULT NULL")
+            except Exception:
+                pass
 
             # F5: extend narrative_snapshots with linked_assets, topic_tags, burst_ratio
             for col, coltype in [
@@ -1110,6 +1147,10 @@ class SqliteRepository(Repository):
                 "CREATE INDEX IF NOT EXISTS idx_assignments_narrative ON narrative_assignments(narrative_id)",
                 "CREATE INDEX IF NOT EXISTS idx_portfolio_holdings_portfolio ON portfolio_holdings(portfolio_id)",
                 "CREATE INDEX IF NOT EXISTS idx_candidate_buffer_ingested ON candidate_buffer(ingested_at)",
+                # P11c Batch 5: composite indexes for live query shapes
+                "CREATE INDEX IF NOT EXISTS idx_watchlists_user_created ON watchlists(user_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_notification_rules_user_created ON notification_rules(user_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_notifications_rule_created ON notifications(rule_id, created_at)",
             ]:
                 try:
                     conn.execute(idx_sql)
@@ -1252,6 +1293,10 @@ class SqliteRepository(Repository):
                     computed_at TEXT NOT NULL DEFAULT ''
                 )
             """)
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker_convergence_pressure ON ticker_convergence(pressure_score DESC)")
+            except Exception:
+                pass
 
             # Phase 3 Signal Redesign: convergence exposure column on narratives
             for col, coltype in [
@@ -1375,6 +1420,10 @@ class SqliteRepository(Repository):
                     recorded_at TEXT NOT NULL
                 )
             """)
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_social_mentions_recorded_ticker ON social_mentions(recorded_at, ticker)")
+            except Exception:
+                pass
 
             # Phase 6 Signal Redesign: directional impact scores
             conn.execute("""
@@ -1632,13 +1681,98 @@ class SqliteRepository(Repository):
                 list(narrative.values()),
             )
 
+    def atomically_persist_cluster(
+        self,
+        narrative: dict,
+        cycle_slot: str,
+        centroid_blob: bytes,
+        member_docs: list[dict],
+        today: str,
+        post_write_hook=None,
+    ) -> None:
+        """
+        Persist a newly created cluster in one SQLite transaction.
+
+        If any statement fails (or post_write_hook raises), all DB writes roll back.
+        """
+        with self._get_conn() as conn:
+            safe_cols = self._sanitize_columns(narrative.keys())
+            cols = ", ".join(safe_cols)
+            placeholders = ", ".join("?" * len(safe_cols))
+            conn.execute(
+                f"INSERT INTO narratives ({cols}) VALUES ({placeholders})",
+                list(narrative.values()),
+            )
+            conn.execute(
+                "INSERT INTO centroid_history (narrative_id, date, centroid_blob) VALUES (?, ?, ?)",
+                (narrative["narrative_id"], cycle_slot, centroid_blob),
+            )
+
+            for doc in member_docs:
+                doc_id = doc.get("doc_id")
+                if not doc_id:
+                    continue
+                conn.execute(
+                    "INSERT INTO narrative_assignments (narrative_id, doc_id, assigned_at) VALUES (?, ?, ?)",
+                    (narrative["narrative_id"], doc_id, today),
+                )
+                conn.execute(
+                    "UPDATE candidate_buffer SET status = ?, narrative_id_assigned = ? WHERE doc_id = ?",
+                    ("clustered", narrative["narrative_id"], doc_id),
+                )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO document_evidence
+                        (doc_id, narrative_id, source_url, source_domain, published_at, author, excerpt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        doc_id,
+                        narrative["narrative_id"],
+                        doc.get("source_url") or "",
+                        doc.get("source_domain") or "",
+                        doc.get("published_at") or "",
+                        doc.get("author") or "",
+                        (doc.get("raw_text") or "")[:500],
+                    ),
+                )
+
+            if post_write_hook is not None:
+                post_write_hook()
+
+    def verify_cluster_consistency(self, vector_ids: set[str]) -> dict:
+        """Detect divergence between active SQLite narratives and in-memory vector IDs."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT narrative_id FROM narratives WHERE suppressed = 0 AND stage != 'Dormant'"
+            ).fetchall()
+        active_ids = {r[0] for r in rows}
+        missing = sorted(active_ids - vector_ids)
+        if missing:
+            logger.warning(
+                "Cluster divergence detected: %d active narratives missing from vector index",
+                len(missing),
+            )
+        return {
+            "active_count": len(active_ids),
+            "vector_count": len(vector_ids),
+            "missing_count": len(missing),
+            "missing_ids": missing,
+        }
+
     def update_narrative(self, narrative_id: str, updates: dict) -> None:
         if not updates:
             return
+        normalized = dict(updates)
+        if "document_count" in normalized:
+            try:
+                normalized["document_count"] = max(int(round(float(normalized["document_count"]))), 0)
+            except (TypeError, ValueError):
+                normalized["document_count"] = 0
         with self._get_conn() as conn:
-            safe_cols = self._sanitize_columns(updates.keys())
+            safe_cols = self._sanitize_columns(normalized.keys())
             set_clause = ", ".join(f"{k} = ?" for k in safe_cols)
-            values = list(updates.values()) + [narrative_id]
+            values = [normalized[k] for k in safe_cols] + [narrative_id]
             conn.execute(
                 f"UPDATE narratives SET {set_clause} WHERE narrative_id = ?",
                 values,
@@ -1652,6 +1786,7 @@ class SqliteRepository(Repository):
         if survivor_id == absorbed_id:
             return
 
+        old_desc: str = ""
         with self._get_conn() as conn:
             # Validate survivor exists
             survivor = conn.execute(
@@ -1670,44 +1805,59 @@ class SqliteRepository(Repository):
                 raise ValueError(f"Absorbed narrative {absorbed_id} does not exist")
             if row["stage"] == "Dormant" and "Merged into" in (row["description"] or ""):
                 return  # already merged in a prior run — skip
-
-            # 1. Reassign document_evidence rows
-            conn.execute(
-                "UPDATE document_evidence SET narrative_id = ? WHERE narrative_id = ?",
-                (survivor_id, absorbed_id),
-            )
-
-            # 2. Reassign narrative_assignments rows
-            conn.execute(
-                "UPDATE narrative_assignments SET narrative_id = ? WHERE narrative_id = ?",
-                (survivor_id, absorbed_id),
-            )
-
-            # 3. Update survivor's document_count to combined total
-            combined = conn.execute(
-                "SELECT COUNT(*) as cnt FROM document_evidence WHERE narrative_id = ?",
-                (survivor_id,),
-            ).fetchone()
-            conn.execute(
-                "UPDATE narratives SET document_count = ? WHERE narrative_id = ?",
-                (combined["cnt"], survivor_id),
-            )
-
-            # 4. Preserve existing description, append merge note
             old_desc = row["description"] or ""
-            merge_note = f"Merged into {survivor_id}"
-            new_desc = f"{old_desc} | {merge_note}" if old_desc else merge_note
-            conn.execute(
-                "UPDATE narratives SET stage = 'Dormant', description = ?, document_count = 0 WHERE narrative_id = ?",
-                (new_desc, absorbed_id),
-            )
 
-        # 5. Remove absorbed centroid from vector store (outside transaction)
         if vector_store is not None:
             try:
                 vector_store.delete(absorbed_id)
             except Exception as exc:
-                logger.warning("Failed to delete centroid for %s: %s", absorbed_id, exc)
+                logger.error(
+                    "merge_narrative aborted: failed to delete centroid for %s before DB merge: %s",
+                    absorbed_id,
+                    exc,
+                )
+                raise
+
+        try:
+            with self._get_conn() as conn:
+            # 1. Reassign document_evidence rows
+                conn.execute(
+                    "UPDATE document_evidence SET narrative_id = ? WHERE narrative_id = ?",
+                    (survivor_id, absorbed_id),
+                )
+
+                # 2. Reassign narrative_assignments rows
+                conn.execute(
+                    "UPDATE narrative_assignments SET narrative_id = ? WHERE narrative_id = ?",
+                    (survivor_id, absorbed_id),
+                )
+
+                # 3. Update survivor's document_count to combined total
+                combined = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM document_evidence WHERE narrative_id = ?",
+                    (survivor_id,),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE narratives SET document_count = ? WHERE narrative_id = ?",
+                    (combined["cnt"], survivor_id),
+                )
+
+                # 4. Preserve existing description, append merge note
+                merge_note = f"Merged into {survivor_id}"
+                new_desc = f"{old_desc} | {merge_note}" if old_desc else merge_note
+                conn.execute(
+                    "UPDATE narratives SET stage = 'Dormant', description = ?, document_count = 0 WHERE narrative_id = ?",
+                    (new_desc, absorbed_id),
+                )
+        except Exception as exc:
+            logger.error(
+                "merge_narrative DB update failed after centroid delete; manual consistency audit needed "
+                "(survivor=%s absorbed=%s): %s",
+                survivor_id,
+                absorbed_id,
+                exc,
+            )
+            raise
 
     def update_narrative_tags(self, narrative_id: str, tags: list) -> None:
         """Store topic tags as JSON array string."""
@@ -1751,11 +1901,17 @@ class SqliteRepository(Repository):
 
     # --- Candidate Buffer Operations ---
 
-    def get_candidate_buffer(self, status: str = "pending") -> list[dict]:
+    def get_candidate_buffer(self, status: str = "pending", limit: int | None = None) -> list[dict]:
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM candidate_buffer WHERE status = ?", (status,)
-            ).fetchall()
+            sql = (
+                "SELECT * FROM candidate_buffer WHERE status = ? "
+                "ORDER BY ingested_at ASC, doc_id ASC"
+            )
+            params: list = [status]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(int(limit))
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
 
     def insert_candidate(self, candidate: dict) -> None:
@@ -1764,7 +1920,7 @@ class SqliteRepository(Repository):
             cols = ", ".join(safe_cols)
             placeholders = ", ".join("?" * len(safe_cols))
             conn.execute(
-                f"INSERT INTO candidate_buffer ({cols}) VALUES ({placeholders})",
+                f"INSERT OR IGNORE INTO candidate_buffer ({cols}) VALUES ({placeholders})",
                 list(candidate.values()),
             )
 
@@ -2663,9 +2819,26 @@ class SqliteRepository(Repository):
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def mark_notification_read(self, notification_id: str) -> None:
+    def get_notification(self, notification_id: str) -> dict | None:
         with self._get_conn() as conn:
-            conn.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", (notification_id,))
+            row = conn.execute(
+                "SELECT * FROM notifications WHERE id = ?",
+                (notification_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def mark_notification_read(self, notification_id: str, user_id: str | None = None) -> None:
+        with self._get_conn() as conn:
+            if user_id is None:
+                conn.execute(
+                    "UPDATE notifications SET is_read = 1 WHERE id = ?",
+                    (notification_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?",
+                    (notification_id, user_id),
+                )
 
     def mark_all_notifications_read(self, user_id: str) -> None:
         with self._get_conn() as conn:
@@ -3174,10 +3347,87 @@ class SqliteRepository(Repository):
             ).fetchone()
             return dict(row) if row else None
 
-    def get_all_narrative_signals(self) -> list[dict]:
+    def get_all_narrative_signals(self, *, limit: int = 0, offset: int = 0) -> list[dict]:
+        sql = (
+            "SELECT narrative_id, direction, confidence, timeframe, magnitude, certainty, "
+            "key_actors, affected_sectors, catalyst_type, extracted_at "
+            "FROM narrative_signals ORDER BY extracted_at DESC"
+        )
+        params: list = []
+        if limit > 0:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT * FROM narrative_signals").fetchall()
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    def get_narratives_by_ids(self, ids: list[str]) -> dict[str, dict]:
+        """Bulk fetch narratives by ID. Chunked to stay under SQLite parameter limit."""
+        if not ids:
+            return {}
+        result: dict[str, dict] = {}
+        chunk_size = 900
+        with self._get_conn() as conn:
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i : i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM narratives WHERE narrative_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    result[r["narrative_id"]] = dict(r)
+        return result
+
+    def get_adversarial_events_for_narratives(self, ids: list[str], limit_per: int = 10) -> dict[str, list]:
+        """Bulk fetch adversarial events keyed by narrative_id."""
+        if not ids:
+            return {}
+        rows_by_id: dict[str, list] = {nid: [] for nid in ids}
+        chunk_size = 900
+        with self._get_conn() as conn:
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i : i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM adversarial_log WHERE narrative_id IN ({placeholders}) "
+                    "ORDER BY narrative_id, detected_at DESC",
+                    chunk,
+                ).fetchall()
+                counts: dict[str, int] = {}
+                for r in rows:
+                    nid = r["narrative_id"]
+                    if nid not in rows_by_id:
+                        continue
+                    if counts.get(nid, 0) < limit_per:
+                        rows_by_id[nid].append(dict(r))
+                        counts[nid] = counts.get(nid, 0) + 1
+        return rows_by_id
+
+    def get_snapshot_history_for_narratives(self, ids: list[str], days: int = 90) -> dict[str, list]:
+        """Bulk fetch snapshot history keyed by narrative_id."""
+        if not ids:
+            return {}
+        rows_by_id: dict[str, list] = {nid: [] for nid in ids}
+        chunk_size = 900
+        with self._get_conn() as conn:
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i : i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM narrative_snapshots WHERE narrative_id IN ({placeholders}) "
+                    "ORDER BY narrative_id, snapshot_date DESC",
+                    chunk,
+                ).fetchall()
+                counts: dict[str, int] = {}
+                for r in rows:
+                    nid = r["narrative_id"]
+                    if nid not in rows_by_id:
+                        continue
+                    if counts.get(nid, 0) < days:
+                        rows_by_id[nid].append(dict(r))
+                        counts[nid] = counts.get(nid, 0) + 1
+        return rows_by_id
 
     # --- Convergence Operations ---
 
@@ -3235,6 +3485,92 @@ class SqliteRepository(Repository):
     def clear_ticker_convergences(self) -> None:
         with self._get_conn() as conn:
             conn.execute("DELETE FROM ticker_convergence")
+
+    def replace_ticker_convergences(self, convergences: dict[str, dict]) -> None:
+        import json as _json
+        import datetime as _dt
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM ticker_convergence")
+            for ticker, data in convergences.items():
+                contributing = data.get("contributing_narrative_ids", [])
+                if isinstance(contributing, list):
+                    contributing = _json.dumps(contributing)
+                computed_at = data.get("computed_at") or now_iso
+                conn.execute("""
+                    INSERT INTO ticker_convergence
+                        (ticker, convergence_count, direction_agreement,
+                         direction_consensus, weighted_confidence, source_diversity,
+                         pressure_score, contributing_narrative_ids, computed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ticker,
+                    int(data.get("convergence_count", 0)),
+                    float(data.get("direction_agreement", 0.0)),
+                    float(data.get("direction_consensus", 0.0)),
+                    float(data.get("weighted_confidence", 0.0)),
+                    int(data.get("source_diversity", 0)),
+                    float(data.get("pressure_score", 0.0)),
+                    contributing,
+                    computed_at,
+                ))
+
+    def check_all_orphans(self) -> dict[str, dict]:
+        """Read-only FK precheck. Returns {relationship: {count, sample_ids}}."""
+        checks = [
+            ("portfolio_holdings.portfolio_id -> portfolios.id",
+             "SELECT h.portfolio_id FROM portfolio_holdings h "
+             "LEFT JOIN portfolios p ON h.portfolio_id = p.id "
+             "WHERE p.id IS NULL"),
+            ("watchlist_items.watchlist_id -> watchlists.id",
+             "SELECT wi.watchlist_id FROM watchlist_items wi "
+             "LEFT JOIN watchlists w ON wi.watchlist_id = w.id "
+             "WHERE w.id IS NULL"),
+            ("notifications.rule_id -> notification_rules.id",
+             "SELECT n.rule_id FROM notifications n "
+             "LEFT JOIN notification_rules nr ON n.rule_id = nr.id "
+             "WHERE n.rule_id IS NOT NULL AND nr.id IS NULL"),
+            ("document_evidence.narrative_id -> narratives.narrative_id",
+             "SELECT de.narrative_id FROM document_evidence de "
+             "LEFT JOIN narratives na ON de.narrative_id = na.narrative_id "
+             "WHERE de.narrative_id IS NOT NULL AND na.narrative_id IS NULL"),
+            ("narrative_snapshots.narrative_id -> narratives.narrative_id",
+             "SELECT ns.narrative_id FROM narrative_snapshots ns "
+             "LEFT JOIN narratives na ON ns.narrative_id = na.narrative_id "
+             "WHERE na.narrative_id IS NULL"),
+            ("mutation_events.narrative_id -> narratives.narrative_id",
+             "SELECT me.narrative_id FROM mutation_events me "
+             "LEFT JOIN narratives na ON me.narrative_id = na.narrative_id "
+             "WHERE na.narrative_id IS NULL"),
+            ("adversarial_log.narrative_id -> narratives.narrative_id",
+             "SELECT al.narrative_id FROM adversarial_log al "
+             "LEFT JOIN narratives na ON al.narrative_id = na.narrative_id "
+             "WHERE al.narrative_id IS NOT NULL AND na.narrative_id IS NULL"),
+            ("centroid_history.narrative_id -> narratives.narrative_id",
+             "SELECT ch.narrative_id FROM centroid_history ch "
+             "LEFT JOIN narratives na ON ch.narrative_id = na.narrative_id "
+             "WHERE na.narrative_id IS NULL"),
+            ("narrative_assignments.narrative_id -> narratives.narrative_id",
+             "SELECT nas.narrative_id FROM narrative_assignments nas "
+             "LEFT JOIN narratives na ON nas.narrative_id = na.narrative_id "
+             "WHERE na.narrative_id IS NULL"),
+        ]
+        result: dict[str, dict] = {}
+        with self._get_conn() as conn:
+            for rel, sql in checks:
+                try:
+                    rows = conn.execute(sql + " LIMIT 10").fetchall()
+                    count_row = conn.execute(
+                        f"SELECT COUNT(*) FROM ({sql})"
+                    ).fetchone()
+                    count = count_row[0] if count_row else len(rows)
+                    result[rel] = {
+                        "count": count,
+                        "sample_ids": [r[0] for r in rows],
+                    }
+                except Exception as exc:
+                    result[rel] = {"count": -1, "error": str(exc), "sample_ids": []}
+        return result
 
     # --- Impact Score Operations (Phase 6) ---
 

@@ -13,10 +13,9 @@ with 0.72 confidence, 1-2 week horizon, based on convergence pressure +
 institutional pickup + earnings proximity."
 """
 
-import json
 import logging
 
-from signals import direction_to_float, certainty_to_float, magnitude_to_float
+from signals import certainty_to_float, magnitude_to_float
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +36,7 @@ def compute_directional_impact(
     escalation: dict,
     catalyst: dict,
     asset_name: str = "",
+    source: str | None = None,
 ) -> dict:
     """
     Compose directional impact from all available signal data.
@@ -135,6 +135,7 @@ def compute_directional_impact(
         "ticker": ticker,
         "asset_name": asset_name,
         "similarity_score": similarity_score,
+        "source": source,
         "direction": direction,
         "impact_score": round(impact_score, 4),
         "confidence": round(confidence, 4),
@@ -215,6 +216,7 @@ def enrich_linked_assets(
             escalation=escalation,
             catalyst=catalyst,
             asset_name=asset.get("asset_name", ""),
+            source=asset.get("source"),
         )
         enriched.append(result)
 

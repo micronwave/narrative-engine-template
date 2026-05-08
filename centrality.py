@@ -73,19 +73,34 @@ def build_narrative_graph(
     return graph
 
 
-def compute_centrality(graph: nx.Graph) -> dict[str, float]:
+def compute_centrality(
+    graph: nx.Graph,
+    *,
+    exact_max_nodes: int = 200,
+    approx_k: int = 50,
+) -> dict[str, float]:
     """
     Compute betweenness centrality for all narrative nodes, normalized to [0, 1].
 
     Returns empty dict if fewer than 2 nodes exist.
     If no edges exist, betweenness centrality is 0.0 for all nodes — correct.
 
-    # TODO SCALE: replace betweenness_centrality with approximate harmonic centrality + sampling when active narrative count > 500
+    Uses exact betweenness for graphs with <= exact_max_nodes nodes.
+    Above that threshold, uses approximate betweenness (k pivot nodes, seed=42)
+    to bound runtime on large graphs while preserving output normalization.
     """
     if graph.number_of_nodes() < 2:
         return {}
 
-    raw_scores: dict[str, float] = nx.betweenness_centrality(graph, normalized=True)
+    if graph.number_of_nodes() <= exact_max_nodes:
+        raw_scores: dict[str, float] = nx.betweenness_centrality(graph, normalized=True)
+    else:
+        k = min(approx_k, graph.number_of_nodes())
+        logger.info(
+            "compute_centrality: large graph (%d nodes) — using approximate betweenness (k=%d)",
+            graph.number_of_nodes(), k,
+        )
+        raw_scores = nx.betweenness_centrality(graph, normalized=True, k=k, seed=42)
 
     max_score = max(raw_scores.values()) if raw_scores else 0.0
     if max_score > 0.0:
@@ -101,6 +116,8 @@ def flag_catalysts(centrality_scores: dict[str, float]) -> list[str]:
     Returns empty list if centrality_scores is empty.
     """
     if not centrality_scores:
+        return []
+    if max(centrality_scores.values()) <= 0.0:
         return []
 
     n = len(centrality_scores)

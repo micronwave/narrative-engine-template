@@ -4,7 +4,6 @@ import { useEffect, useState, useMemo } from "react";
 import {
   fetchNarrativeHistories,
   type AnalyticsHistoriesResponse,
-  type AnalyticsHistorySnapshot,
 } from "@/lib/api";
 import { parseDays } from "@/components/analytics/GlobalTimeRange";
 import { COLORS } from "@/lib/colors";
@@ -31,8 +30,6 @@ const EVENT_STYLES: Record<string, { icon: string; color: string; label: string 
 
 function deriveEvents(data: AnalyticsHistoriesResponse): TimelineEvent[] {
   const events: TimelineEvent[] = [];
-  const totalDays = data.days;
-
   for (const [nid, nh] of Object.entries(data.narratives)) {
     const history = nh.history;
     let detectedIdx = -1;
@@ -66,7 +63,6 @@ function deriveEvents(data: AnalyticsHistoriesResponse): TimelineEvent[] {
     }
 
     // Stage changes: compare adjacent non-null snapshots
-    let prevStage: string | null = null;
     for (let i = 0; i < history.length; i++) {
       const snap = history[i];
       if (snap.velocity === null) continue;

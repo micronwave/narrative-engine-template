@@ -3,7 +3,6 @@
 import { useEffect, useState, useMemo } from "react";
 import {
   fetchContrarianSignals,
-  type AnalyticsContrarianResponse,
   type AnalyticsContrarianSignal,
 } from "@/lib/api";
 import { parseDays } from "@/components/analytics/GlobalTimeRange";

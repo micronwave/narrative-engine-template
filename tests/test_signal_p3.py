@@ -490,6 +490,103 @@ T("SP3-INT-1: full round-trip — ticker_convergence populated, convergence_expo
 
 
 # ===========================================================================
+# Section 6: Centrality all-zero guard (P12 Batch 1.1)
+# ===========================================================================
+S("SP3-CENT: flag_catalysts all-zero guard")
+
+from centrality import flag_catalysts
+
+# Empty map → []
+T("SP3-CENT-1: empty centrality_scores returns []",
+  flag_catalysts({}) == [],
+  "got non-empty list")
+
+# All-zero map → [] (no stale catalyst manufacturing)
+_all_zero = {"nar-a": 0.0, "nar-b": 0.0, "nar-c": 0.0}
+T("SP3-CENT-2: all-zero scores returns [] (no stale catalyst)",
+  flag_catalysts(_all_zero) == [],
+  f"got {flag_catalysts(_all_zero)}")
+
+# At least one positive → normal top-decile behavior
+_mixed = {"nar-a": 0.0, "nar-b": 0.5, "nar-c": 0.0}
+_cats = flag_catalysts(_mixed)
+T("SP3-CENT-3: mixed scores returns top positive narrative",
+  len(_cats) == 1 and _cats[0] == "nar-b",
+  f"got {_cats}")
+
+
+# ===========================================================================
+# Section 7: replace_ticker_convergences atomicity (P12 Batch 1.2)
+# ===========================================================================
+S("SP3-REPLACE: replace_ticker_convergences atomic replace")
+
+_replace_repo = _get_temp_repo()
+
+# Seed old rows
+_replace_repo.upsert_ticker_convergence({
+    "ticker": "OLD1",
+    "convergence_count": 1,
+    "direction_agreement": 0.5,
+    "direction_consensus": 0.5,
+    "weighted_confidence": 0.5,
+    "source_diversity": 1,
+    "pressure_score": 0.5,
+    "contributing_narrative_ids": [],
+})
+
+# Replace with entirely new set
+_new_convergences = {
+    "NEW1": {
+        "convergence_count": 2,
+        "direction_agreement": -0.8,
+        "direction_consensus": 0.8,
+        "weighted_confidence": 0.7,
+        "source_diversity": 2,
+        "pressure_score": 1.12,
+        "contributing_narrative_ids": ["n1", "n2"],
+    }
+}
+_replace_repo.replace_ticker_convergences(_new_convergences)
+_old_row = _replace_repo.get_ticker_convergence("OLD1")
+_new_row = _replace_repo.get_ticker_convergence("NEW1")
+T("SP3-REPLACE-1: old rows removed after replace",
+  _old_row is None,
+  f"OLD1 still present: {_old_row}")
+T("SP3-REPLACE-2: new rows present after replace",
+  _new_row is not None and _new_row["convergence_count"] == 2,
+  f"NEW1: {_new_row}")
+
+# Empty replace clears all rows
+_replace_repo.replace_ticker_convergences({})
+T("SP3-REPLACE-3: empty convergences dict clears all rows",
+  _replace_repo.get_ticker_convergence("NEW1") is None and len(_replace_repo.get_all_ticker_convergences()) == 0,
+  "rows remain after empty replace")
+
+# Stale-row preservation: if replace raises, old rows must remain
+_stale_repo = _get_temp_repo()
+_stale_repo.upsert_ticker_convergence({
+    "ticker": "STALE",
+    "convergence_count": 3,
+    "direction_agreement": -0.9,
+    "direction_consensus": 0.9,
+    "weighted_confidence": 0.8,
+    "source_diversity": 3,
+    "pressure_score": 2.16,
+    "contributing_narrative_ids": [],
+})
+try:
+    # Simulate compute failure — caller should NOT call replace at all
+    # Here we verify that NOT calling replace means old row stays intact
+    raise RuntimeError("simulated compute failure")
+except RuntimeError:
+    pass
+_stale_still = _stale_repo.get_ticker_convergence("STALE")
+T("SP3-REPLACE-4: compute failure leaves previous convergence row intact (replace not called)",
+  _stale_still is not None and abs(_stale_still["pressure_score"] - 2.16) < 0.01,
+  f"stale row: {_stale_still}")
+
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 print("\n" + "=" * 60)

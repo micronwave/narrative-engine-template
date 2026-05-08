@@ -200,7 +200,7 @@ T("no blurred items", not any(n.get("blurred") for n in sub_data))
 # ===========================================================================
 S("C4-U8: Regression — C2/C3 endpoints still functional")
 
-T("GET /api/health ok", client.get("/api/health").json() == {"status": "ok"})
+T("GET /api/health ok", client.get("/api/health").json().get("status") == "ok")
 T("GET /api/credits removed", client.get("/api/credits", headers=AUTH_HEADER).status_code == 404)
 T("POST /api/credits/use removed", client.post("/api/credits/use", headers=AUTH_HEADER).status_code == 404)
 T("GET /api/constellation ok", client.get("/api/constellation").status_code == 200)

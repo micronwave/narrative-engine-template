@@ -4,7 +4,6 @@ All sources are opt-in via settings keys and feature flags.
 Returns empty list silently when disabled or credentials absent.
 """
 
-import calendar
 import email.utils
 import hashlib
 import logging
@@ -14,11 +13,15 @@ from urllib.parse import urlparse
 
 import requests
 
-from ingester import RawDocument, is_financially_relevant
+from ingester import RawDocument, is_financially_relevant, is_valid_source_url
 from repository import SqliteRepository
 from settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {str(exc).split('?')[0][:100]}"
 
 
 def _normalize_pubdate(raw: str) -> str:
@@ -91,6 +94,8 @@ class MarketauxIngester:
             }, timeout=30)
             resp.raise_for_status()
             data = resp.json()
+            if "data" not in data:
+                logger.warning("[MarketAux] 200 response missing 'data' key; treating as zero docs")
 
             docs = []
             for article in data.get("data", []):
@@ -100,6 +105,9 @@ class MarketauxIngester:
                 if not is_financially_relevant(text):
                     continue
                 url = article.get("url", "")
+                if not is_valid_source_url(url):
+                    logger.warning("[MarketAux] Skipping article with invalid URL: %s", url)
+                    continue
                 doc_id = hashlib.sha256(url.encode()).hexdigest()[:16] if url else str(uuid.uuid4())
                 source = urlparse(url).netloc.replace("www.", "") if url else "marketaux.com"
                 docs.append(RawDocument(
@@ -115,8 +123,8 @@ class MarketauxIngester:
             self.tracker.increment("marketaux", self.settings.MARKETAUX_DAILY_LIMIT)
             logger.info("[MarketAux] Ingested %d documents", len(docs))
             return docs
-        except Exception as exc:
-            logger.warning("[MarketAux] Error: %s", exc)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("[MarketAux] ingestion failed: %s", _sanitize_exception(exc))
             return []
 
 
@@ -142,6 +150,8 @@ class NewsdataIngester:
             }, timeout=30)
             resp.raise_for_status()
             data = resp.json()
+            if "results" not in data:
+                logger.warning("[NewsData] 200 response missing 'results' key; treating as zero docs")
 
             docs = []
             for article in data.get("results", []):
@@ -151,6 +161,9 @@ class NewsdataIngester:
                 if not is_financially_relevant(text):
                     continue
                 url = article.get("link", "")
+                if not is_valid_source_url(url):
+                    logger.warning("[NewsData] Skipping article with invalid URL: %s", url)
+                    continue
                 doc_id = hashlib.sha256(url.encode()).hexdigest()[:16] if url else str(uuid.uuid4())
                 pub_raw = article.get("pubDate")
                 published_at = _normalize_pubdate(pub_raw) if pub_raw else datetime.now(timezone.utc).isoformat()
@@ -167,8 +180,8 @@ class NewsdataIngester:
             self.tracker.increment("newsdata", self.settings.NEWSDATA_DAILY_LIMIT)
             logger.info("[NewsData] Ingested %d documents", len(docs))
             return docs
-        except Exception as exc:
-            logger.warning("[NewsData] Error: %s", exc)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("[NewsData] ingestion failed: %s", _sanitize_exception(exc))
             return []
 
 
@@ -216,6 +229,8 @@ class RedditIngester:
                         continue
                     text = f"{post.title} {post.selftext}".strip() if post.selftext else post.title
                     truncated = text[:5000]
+                    if not is_financially_relevant(truncated):
+                        continue
                     doc_id = hashlib.sha256(post.id.encode()).hexdigest()[:16]
                     docs.append(RawDocument(
                         doc_id=doc_id,

@@ -68,8 +68,9 @@ class MockRepository:
         self.centroid_history = []
         self.assignments = []
 
-    def get_candidate_buffer(self, status="pending"):
-        return [c for c in self._cands if c["status"] == status]
+    def get_candidate_buffer(self, status="pending", limit=None):
+        rows = [c for c in self._cands if c["status"] == status]
+        return rows[:limit] if limit is not None else rows
 
     def insert_narrative(self, n):
         self.narratives.append(n)
@@ -305,7 +306,10 @@ try:
     try:
         cats = flag_catalysts(scores)
         assert isinstance(cats, list)
-        assert len(cats) >= 1  # 3 narratives -> top 1
+        if max(scores.values(), default=0.0) > 0.0:
+            assert len(cats) >= 1  # 3 narratives -> top 1 when centrality is non-zero
+        else:
+            assert cats == []  # P14: all-zero centrality should not flag catalysts
         passed("centrality: flag_catalysts", f"flagged={cats}")
     except Exception as exc:
         failed("centrality: flag_catalysts", traceback.format_exc(limit=4))

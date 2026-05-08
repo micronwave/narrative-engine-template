@@ -4,6 +4,7 @@ is mandatory on all output objects for Fair Use compliance. Do not strip attribu
 """
 
 import calendar
+import concurrent.futures
 import email.utils
 import hashlib
 import html as html_module
@@ -53,6 +54,14 @@ def _compute_hash(text: str) -> str:
 
 def _extract_domain(url: str) -> str:
     return urlparse(url).netloc or url
+
+
+def is_valid_source_url(url: str) -> bool:
+    """Accept only absolute http(s) URLs with a host."""
+    if not isinstance(url, str):
+        return False
+    parsed = urlparse(url.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +147,7 @@ def _parse_published_at(entry: dict, fallback: str) -> str:
         try:
             ts = calendar.timegm(parsed_time)
             return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     # feedparser sets published_parsed=None when it can't parse the date string.
     # Try RFC 2822 parse (email.utils handles the most common RSS date formats)
@@ -148,7 +157,7 @@ def _parse_published_at(entry: dict, fallback: str) -> str:
         try:
             dt = email.utils.parsedate_to_datetime(raw)
             return dt.astimezone(timezone.utc).isoformat()
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     logger.warning("Could not determine published_at for entry; using ingested_at as fallback")
     return fallback
@@ -267,126 +276,152 @@ class RssIngester(Ingester):
         self,
         repository: Repository,
         feed_urls: list[str] | None = None,
+        settings=None,
     ) -> None:
         self._repository = repository
         self._feed_urls: list[str] = (
             feed_urls if feed_urls is not None else list(self._DEFAULT_FEEDS)
         )
+        self._scrape_max_threads = int(getattr(settings, "SCRAPE_MAX_THREADS", 3))
 
     def ingest(self) -> list[RawDocument]:
+        """Ingest from configured RSS feeds and return collected RawDocument items.
+
+        Feed URLs come from constructor input or the built-in default list. Per-feed
+        processing performs robots checks and parsing in _ingest_feed(). Worker
+        failures are logged and do not abort ingestion of other feeds.
+        """
         docs: list[RawDocument] = []
         ingested_at = datetime.now(timezone.utc).isoformat()
+        max_workers = max(1, min(self._scrape_max_threads, len(self._feed_urls) or 1))
 
-        for feed_url in self._feed_urls:
-            if not can_fetch(feed_url, self._repository):
-                logger.info("robots.txt disallows %s — skipping feed", feed_url)
-                continue
-
-            # Conditional HTTP: check stored metadata for adaptive polling
-            feed_meta = self._repository.get_feed_metadata(feed_url)
-            if feed_meta:
-                empty_cycles = feed_meta.get("consecutive_empty_cycles") or 0
-                last_fetched = feed_meta.get("last_fetched_at")
-                if empty_cycles >= 3 and last_fetched:
-                    try:
-                        fetched_dt = datetime.fromisoformat(last_fetched)
-                        if datetime.now(timezone.utc) - fetched_dt < timedelta(hours=12):
-                            logger.debug("Skipping stale feed (empty %d cycles): %s", empty_cycles, feed_url)
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-
-            try:
-                req = urllib.request.Request(
-                    feed_url,
-                    headers={"User-Agent": "NarrativeIntelligenceBot/1.0"},
-                )
-                # Add conditional HTTP headers
-                if feed_meta:
-                    if feed_meta.get("etag"):
-                        req.add_header("If-None-Match", feed_meta["etag"])
-                    if feed_meta.get("last_modified"):
-                        req.add_header("If-Modified-Since", feed_meta["last_modified"])
-
-                resp_etag = None
-                resp_last_modified = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self._ingest_feed, feed_url, ingested_at)
+                for feed_url in self._feed_urls
+            ]
+            for future in concurrent.futures.as_completed(futures):
                 try:
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        feed_bytes = resp.read(10 * 1024 * 1024)  # 10 MB cap
-                        resp_etag = resp.headers.get("ETag")
-                        resp_last_modified = resp.headers.get("Last-Modified")
-                except urllib.error.HTTPError as http_err:
-                    if http_err.code == 304:
-                        logger.debug("304 Not Modified for %s", feed_url)
-                        continue  # conditional HTTP working — no metadata update needed
-                    raise
+                    docs.extend(future.result())
+                except (TimeoutError, OSError, concurrent.futures.CancelledError) as exc:
+                    # Non-fatal: one feed can fail without aborting all ingestion.
+                    logger.error("RSS worker failure: %s", exc)
+        return docs
 
-                parsed = feedparser.parse(feed_bytes)
-            except Exception as exc:
-                logger.error("feedparser raised for %s: %s", feed_url, exc)
-                _log_failed_job(self._repository, feed_url, "rss", str(exc))
+    def _ingest_feed(self, feed_url: str, ingested_at: str) -> list[RawDocument]:
+        docs: list[RawDocument] = []
+        if not can_fetch(feed_url, self._repository):
+            logger.info("robots.txt disallows %s — skipping feed", feed_url)
+            return docs
+
+        # Conditional HTTP: check stored metadata for adaptive polling
+        feed_meta = self._repository.get_feed_metadata(feed_url)
+        if feed_meta:
+            empty_cycles = feed_meta.get("consecutive_empty_cycles") or 0
+            last_fetched = feed_meta.get("last_fetched_at")
+            if empty_cycles >= 3 and last_fetched:
+                try:
+                    fetched_dt = datetime.fromisoformat(last_fetched)
+                    if datetime.now(timezone.utc) - fetched_dt < timedelta(hours=12):
+                        logger.debug("Skipping stale feed (empty %d cycles): %s", empty_cycles, feed_url)
+                        return docs
+                except (ValueError, TypeError):
+                    pass
+
+        try:
+            req = urllib.request.Request(
+                feed_url,
+                headers={"User-Agent": "NarrativeIntelligenceBot/1.0"},
+            )
+            # Add conditional HTTP headers
+            if feed_meta:
+                if feed_meta.get("etag"):
+                    req.add_header("If-None-Match", feed_meta["etag"])
+                if feed_meta.get("last_modified"):
+                    req.add_header("If-Modified-Since", feed_meta["last_modified"])
+
+            resp_etag = None
+            resp_last_modified = None
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    feed_bytes = resp.read(10 * 1024 * 1024)  # 10 MB cap
+                    resp_etag = resp.headers.get("ETag")
+                    resp_last_modified = resp.headers.get("Last-Modified")
+            except urllib.error.HTTPError as http_err:
+                if http_err.code == 304:
+                    logger.debug("304 Not Modified for %s", feed_url)
+                    return docs  # conditional HTTP working — no metadata update needed
+                raise
+
+            parsed = feedparser.parse(feed_bytes)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            logger.error("feedparser raised for %s: %s", feed_url, exc)
+            _log_failed_job(self._repository, feed_url, "rss", str(exc))
+            return docs
+
+        if parsed.bozo and not parsed.entries:
+            exc_msg = str(getattr(parsed, "bozo_exception", "malformed feed"))
+            logger.error("Feed error for %s: %s", feed_url, exc_msg)
+            _log_failed_job(self._repository, feed_url, "rss", exc_msg)
+            return docs
+
+        if parsed.bozo:
+            logger.warning(
+                "Bozo feed (partially parseable) %s: %s",
+                feed_url,
+                getattr(parsed, "bozo_exception", ""),
+            )
+
+        pre_feed_count = len(docs)
+
+        for entry in parsed.entries:
+            link = entry.get("link", "")
+            if not is_valid_source_url(link):
+                if link:
+                    logger.warning("Skipping RSS entry with invalid source_url: %s", link)
                 continue
 
-            if parsed.bozo and not parsed.entries:
-                exc_msg = str(getattr(parsed, "bozo_exception", "malformed feed"))
-                logger.error("Feed error for %s: %s", feed_url, exc_msg)
-                _log_failed_job(self._repository, feed_url, "rss", exc_msg)
+            raw_text = _entry_text(entry)
+            if not raw_text.strip():
                 continue
 
-            if parsed.bozo:
-                logger.warning(
-                    "Bozo feed (partially parseable) %s: %s",
-                    feed_url,
-                    getattr(parsed, "bozo_exception", ""),
-                )
+            source_domain = _extract_domain(link)
 
-            pre_feed_count = len(docs)
+            # Enrich short excerpts (paywalled/headline-only sources) with
+            # domain + category metadata so embeddings have more signal.
+            if len(raw_text) < 200:
+                title = entry.get("title", "")
+                tags_list = entry.get("tags") or []
+                section = ""
+                if tags_list and isinstance(tags_list[0], dict):
+                    section = tags_list[0].get("term", "")
+                parts = [source_domain]
+                if section:
+                    parts.append(section)
+                parts.append(title or raw_text)
+                raw_text = ": ".join(parts)
 
-            for entry in parsed.entries:
-                link = entry.get("link", "")
-                if not link:
-                    continue
+            if not is_financially_relevant(raw_text):
+                logger.debug("Skipping non-financial article: %.80s", raw_text)
+                continue
+            published_at = _parse_published_at(entry, ingested_at)
+            doc_id = str(uuid.uuid4())
 
-                raw_text = _entry_text(entry)
-                if not raw_text.strip():
-                    continue
+            doc = RawDocument(
+                doc_id=doc_id,
+                raw_text=raw_text,
+                source_url=link,
+                source_domain=source_domain,
+                published_at=published_at,
+                ingested_at=ingested_at,
+                author=entry.get("author") or None,
+                raw_text_hash=_compute_hash(raw_text),
+            )
+            docs.append(doc)
 
-                source_domain = _extract_domain(link)
-
-                # Enrich short excerpts (paywalled/headline-only sources) with
-                # domain + category metadata so embeddings have more signal.
-                if len(raw_text) < 200:
-                    title = entry.get("title", "")
-                    tags_list = entry.get("tags") or []
-                    section = tags_list[0].get("term", "") if tags_list else ""
-                    parts = [source_domain]
-                    if section:
-                        parts.append(section)
-                    parts.append(title or raw_text)
-                    raw_text = ": ".join(parts)
-
-                if not is_financially_relevant(raw_text):
-                    logger.debug("Skipping non-financial article: %.80s", raw_text)
-                    continue
-                published_at = _parse_published_at(entry, ingested_at)
-                doc_id = str(uuid.uuid4())
-
-                doc = RawDocument(
-                    doc_id=doc_id,
-                    raw_text=raw_text,
-                    source_url=link,
-                    source_domain=source_domain,
-                    published_at=published_at,
-                    ingested_at=ingested_at,
-                    author=entry.get("author") or None,
-                    raw_text_hash=_compute_hash(raw_text),
-                )
-                docs.append(doc)
-
-            # Update feed metadata with conditional HTTP info
-            feed_doc_count = len(docs) - pre_feed_count
-            self._repository.upsert_feed_metadata(feed_url, resp_etag, resp_last_modified, feed_doc_count)
-
+        # Update feed metadata with conditional HTTP info
+        feed_doc_count = len(docs) - pre_feed_count
+        self._repository.upsert_feed_metadata(feed_url, resp_etag, resp_last_modified, feed_doc_count)
         return docs
 
 
@@ -417,6 +452,12 @@ class EdgarIngester(Ingester):
         self._download_dir = Path(download_dir)
 
     def ingest(self) -> list[RawDocument]:
+        """Ingest configured SEC forms for configured tickers via local filing files.
+
+        This checks SEC robots access, downloads filings for constructor-provided
+        ticker/form pairs, and reads saved text files from the local download tree
+        through _read_filings(). There are no runtime URL or ticker arguments.
+        """
         if not can_fetch(self._SEC_BASE_URL, self._repository):
             logger.info("robots.txt disallows %s — skipping EdgarIngester", self._SEC_DOMAIN)
             return []
@@ -450,7 +491,7 @@ class EdgarIngester(Ingester):
                 try:
                     dl.get(form, ticker, limit=5)
                     docs.extend(self._read_filings(ticker, form, ingested_at))
-                except Exception as exc:
+                except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
                     logger.error(
                         "EDGAR fetch failed for ticker=%s form=%s: %s", ticker, form, exc
                     )
@@ -461,6 +502,13 @@ class EdgarIngester(Ingester):
     def _read_filings(
         self, ticker: str, form: str, ingested_at: str
     ) -> list[RawDocument]:
+        """Read downloaded SEC filing text files for one ticker/form pair.
+
+        Files are read from
+        {download_dir}/sec-edgar-filings/{ticker}/{form}/submission-dir/*.txt,
+        converted to RawDocument objects, and returned. Missing directories or
+        unreadable files are skipped with logging.
+        """
         docs: list[RawDocument] = []
         # sec-edgar-downloader saves to: {download_dir}/sec-edgar-filings/{ticker}/{form}/
         filing_base = self._download_dir / "sec-edgar-filings" / ticker / form
@@ -500,18 +548,8 @@ class EdgarIngester(Ingester):
                         raw_text_hash=_compute_hash(raw_text),
                     )
                     docs.append(doc)
-                except Exception as exc:
+                except (OSError, UnicodeError, ValueError) as exc:
                     logger.error("Error reading EDGAR file %s: %s", txt_file, exc)
 
         return docs
 
-
-# ---------------------------------------------------------------------------
-# PlaywrightIngester (stub)
-# ---------------------------------------------------------------------------
-
-class PlaywrightIngester(Ingester):
-    # TODO: implement after MVP validation and legal ToS review per target site
-
-    def ingest(self) -> list[RawDocument]:
-        raise NotImplementedError("PlaywrightIngester not implemented for MVP")

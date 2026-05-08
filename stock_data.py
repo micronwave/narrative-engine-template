@@ -178,21 +178,6 @@ class StockDataProvider:
             logger.debug("Price history fetch failed for %s: %s", ticker, exc)
             return []
 
-    def get_sparkline_data(self, ticker: str, days: int = 7) -> list[float]:
-        """Returns closing prices for mini chart. Uses cache if available."""
-        cached = self.repository.get_stock_cache(ticker.upper())
-        if cached:
-            key = f"sparkline_{days}d"
-            val = cached.get(key)
-            if val:
-                try:
-                    parsed = json.loads(val) if isinstance(val, str) else val
-                    if parsed:
-                        return parsed
-                except Exception as exc:
-                    logger.debug("Sparkline cache parse failed for %s: %s", ticker, exc)
-        return self._get_sparkline(ticker.upper(), days)
-
     @staticmethod
     def _deserialise_sparklines(data: dict) -> dict | None:
         """Returns copy of cached row with sparklines parsed from JSON strings."""

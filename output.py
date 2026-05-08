@@ -14,6 +14,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from settings import get_api_settings as _get_api_settings
+
 logger = logging.getLogger(__name__)
 
 DISCLAIMER = "INTELLIGENCE ONLY — NOT FINANCIAL ADVICE. For informational purposes only."
@@ -36,14 +38,14 @@ def build_output_object(
     if not lifecycle_reasoning:
         lifecycle_reasoning = _LIFECYCLE_FALLBACK
 
-    # Normalize supporting evidence and truncate excerpts to 280 chars.
+    _excerpt_len = _get_api_settings().OUTPUT_EXCERPT_TRUNCATION
     evidence_out: list[dict] = [
         {
             "source_url": e.get("source_url", ""),
             "source_domain": e.get("source_domain", ""),
             "published_at": e.get("published_at", ""),
             "author": e.get("author"),
-            "excerpt": (e.get("excerpt") or "")[:280],
+            "excerpt": (e.get("excerpt") or "")[:_excerpt_len],
         }
         for e in supporting_evidence
     ]
@@ -170,10 +172,12 @@ def write_outputs(outputs: list[dict], date: str) -> None:
             pass
         raise
 
-    try:
-        sys.stdout.buffer.write(serialized.encode('utf-8', errors='replace'))
-        sys.stdout.buffer.write(b'\n')
-        sys.stdout.buffer.flush()
-    except Exception:
-        logger.debug("Skipped stdout echo (encoding not supported)")
+    _settings = _get_api_settings()
+    if getattr(_settings, "EMIT_OUTPUT_TO_STDOUT", False):
+        try:
+            sys.stdout.buffer.write(serialized.encode('utf-8', errors='replace'))
+            sys.stdout.buffer.write(b'\n')
+            sys.stdout.buffer.flush()
+        except Exception:
+            logger.debug("Skipped stdout echo (encoding not supported)")
     logger.info("Emitted %d narrative(s) to %s", len(outputs), out_path)

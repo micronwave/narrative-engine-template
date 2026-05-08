@@ -93,8 +93,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ["RATE_LIMIT_ENABLED"] = "0"
 
 from fastapi.testclient import TestClient  # noqa: E402
-from api.main import (  # noqa: E402
-    app,
+from api.main import app  # noqa: E402
+from api.app_legacy import (  # noqa: E402
     get_current_user,
     get_optional_user,
     STUB_AUTH_TOKEN,
@@ -160,7 +160,7 @@ def _make_jwt_token(
 
 S("H7-struct: HttpOnly cookie source analysis")
 
-_main_src = (Path(__file__).parent.parent / "api" / "main.py").read_text(encoding="utf-8")
+_main_src = (Path(__file__).parent.parent / "api" / "app_legacy.py").read_text(encoding="utf-8")
 
 # Check that set_cookie is called with httponly=True in signup
 _signup_src = _main_src[_main_src.find("def auth_signup("):]
@@ -258,9 +258,18 @@ T("authFetch helper exists", "function authFetch" in _api_ts)
 S("H7-struct: AuthContext uses /api/auth/me")
 
 _auth_ctx = (Path(__file__).parent.parent / "frontend" / "src" / "contexts" / "AuthContext.tsx").read_text(encoding="utf-8")
-T("AuthContext calls /api/auth/me", "/api/auth/me" in _auth_ctx)
-T("AuthContext uses credentials include", 'credentials: "include"' in _auth_ctx)
-T("AuthContext calls logout endpoint", "/api/auth/logout" in _auth_ctx)
+_api_ts = (Path(__file__).parent.parent / "frontend" / "src" / "lib" / "api.ts").read_text(encoding="utf-8")
+T("AuthContext calls /api/auth/me", "/api/auth/me" in _auth_ctx or "fetchAuthMe" in _auth_ctx)
+# credentials:include and logout URL may be in api.ts helpers called by AuthContext
+T("AuthContext uses credentials include",
+    'credentials: "include"' in _auth_ctx or (
+        ("logoutAuthSession" in _auth_ctx or "fetchAuthMe" in _auth_ctx)
+        and 'credentials: "include"' in _api_ts
+    ))
+T("AuthContext calls logout endpoint",
+    "/api/auth/logout" in _auth_ctx or (
+        "logoutAuthSession" in _auth_ctx and "/api/auth/logout" in _api_ts
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -289,11 +298,18 @@ T("_IS_SECURE_ENV is False in test", _IS_SECURE_ENV is False or _IS_SECURE_ENV =
 
 S("M2-struct: JWT expiry default")
 
-# Check both signup and login use 2h default
-_signup_match_count = _main_src.count('JWT_EXPIRY_HOURS", "2")')
-T("JWT_EXPIRY_HOURS default is 2 (not 24)", _signup_match_count >= 2,
-  f"found {_signup_match_count} occurrences, expected >= 2 (signup, login, refresh)")
-T("no 24h default remains", 'JWT_EXPIRY_HOURS", "24")' not in _main_src)
+# JWT expiry is now read from settings (_API_SETTINGS.JWT_EXPIRY_HOURS), not os.getenv.
+# Verify the settings-based pattern is used in all three token issuance paths.
+_expiry_via_settings = _main_src.count("_API_SETTINGS.JWT_EXPIRY_HOURS")
+T("JWT_EXPIRY_HOURS read from settings in all issuance paths",
+  _expiry_via_settings >= 3,
+  f"found {_expiry_via_settings} occurrences, expected >= 3 (signup, login, refresh)")
+T("no 24h os.getenv default remains", 'JWT_EXPIRY_HOURS", "24")' not in _main_src)
+
+# Verify settings.py default is 2 (not 24)
+_settings_src = (Path(__file__).parent.parent / "settings.py").read_text(encoding="utf-8")
+T("settings.py JWT_EXPIRY_HOURS default is 2", "JWT_EXPIRY_HOURS: int = 2" in _settings_src,
+  "Expected JWT_EXPIRY_HOURS: int = 2 in settings.py")
 
 # ---------------------------------------------------------------------------
 # M2 Structural: RefreshRequest model

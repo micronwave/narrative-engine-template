@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import uuid
 from datetime import datetime, timezone
@@ -7,6 +8,7 @@ import hdbscan
 import numpy as np
 
 from embedding_model import EmbeddingModel
+from prompt_utils import sanitize_for_prompt
 from repository import Repository
 from settings import Settings
 from signals import format_cycle_slot, get_narrative_age_days
@@ -14,8 +16,65 @@ from vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
+# Fallbacks used only if Settings does not define HDBSCAN thresholds.
+# Normal runs use Settings.HDBSCAN_MIN_CLUSTER_SIZE=8 and HDBSCAN_MIN_SAMPLES=5.
 _MIN_CLUSTER_SIZE = 5
 _MIN_SAMPLES = 3
+
+
+def validate_cluster_coherence(
+    llm_client,
+    narrative_id: str,
+    member_docs: list[dict],
+) -> float:
+    """Return coherence score from Haiku validation; fail-open to 1.0 on errors."""
+    try:
+        sample_excerpts = "\n---\n".join(
+            sanitize_for_prompt(doc.get("raw_text") or "", max_len=200)
+            for doc in member_docs[:6]
+            if doc.get("raw_text")
+        )
+        validation_prompt = (
+            "Score this cluster on coherence (0.0-1.0). A high-quality narrative must:\n"
+            "1. Form a single coherent theme (not a grab-bag of unrelated articles)\n"
+            "2. Describe an ongoing market-relevant trend (not a single isolated event)\n"
+            "3. Have a plausible financial or investment implication\n"
+            "Score 0.0 if it fails any criterion.\n\n"
+            "Excerpts:\n"
+            f"{sample_excerpts}\n\n"
+            "Respond in exactly this format:\n"
+            "SCORE: <number> | REASON: <one sentence>"
+        )
+        validation_result = llm_client.call_haiku(
+            "validate_cluster", narrative_id, validation_prompt
+        )
+        coherence_score = 1.0
+        if "SCORE:" in validation_result:
+            score_part = validation_result.split("SCORE:")[1].split("|")[0].strip()
+            try:
+                coherence_score = float(score_part)
+            except ValueError:
+                pass
+        return coherence_score
+    except Exception as exc:
+        logger.warning(
+            "Cluster validation failed for %s (accepting cluster): %s",
+            narrative_id,
+            exc,
+        )
+        return 1.0
+
+
+def _select_survivor_by_doc_count(
+    left_id: str,
+    right_id: str,
+    left_count: int,
+    right_count: int,
+) -> tuple[str, str]:
+    """Return (survivor_id, absorbed_id), preferring higher document_count."""
+    if left_count >= right_count:
+        return left_id, right_id
+    return right_id, left_id
 
 
 def run_clustering(
@@ -36,9 +95,13 @@ def run_clustering(
     """
     min_cluster_size = getattr(settings, 'HDBSCAN_MIN_CLUSTER_SIZE', _MIN_CLUSTER_SIZE)
     min_samples = getattr(settings, 'HDBSCAN_MIN_SAMPLES', _MIN_SAMPLES)
-    cycle_slot = format_cycle_slot(datetime.now(timezone.utc), settings.PIPELINE_FREQUENCY_HOURS)
+    pipeline_frequency_hours = getattr(settings, "PIPELINE_FREQUENCY_HOURS", 4)
+    cycle_slot = format_cycle_slot(datetime.now(timezone.utc), pipeline_frequency_hours)
 
-    candidates = repository.get_candidate_buffer(status="pending")
+    pending_cap = int(getattr(settings, "CLUSTER_MAX_PENDING_BATCH", 0) or 0)
+    if pending_cap <= 0:
+        pending_cap = None
+    candidates = repository.get_candidate_buffer(status="pending", limit=pending_cap)
 
     if len(candidates) < min_cluster_size:
         logger.info(
@@ -127,6 +190,13 @@ def run_clustering(
         logger.info("HDBSCAN found no clusters in current buffer")
         return []
 
+    # Pre-flight check: ensure vector store is writable before DB transaction work.
+    if hasattr(vector_store, "save"):
+        try:
+            vector_store.save()
+        except Exception as exc:
+            raise RuntimeError(f"Vector store preflight write failed: {exc}") from exc
+
     # ------------------------------------------------------------------
     # Initialize VectorStore if this is the first run
     # ------------------------------------------------------------------
@@ -164,9 +234,6 @@ def run_clustering(
 
         narrative_id = str(uuid.uuid4())
 
-        # Add centroid to VectorStore.
-        vector_store.add(centroid.reshape(1, -1), [narrative_id])
-
         # Insert narrative record with all required fields.
         narrative: dict = {
             "narrative_id": narrative_id,
@@ -194,8 +261,6 @@ def run_clustering(
             "last_assignment_date": today,
             "consecutive_declining_cycles": 0,
         }
-        repository.insert_narrative(narrative)
-
         # ------------------------------------------------------------------
         # Optional: validate cluster coherence via Haiku.
         # Builds a sample from the first 6 member excerpts and asks Haiku
@@ -205,84 +270,59 @@ def run_clustering(
         # Falls back to accepting the cluster on any error.
         # ------------------------------------------------------------------
         if llm_client is not None:
-            try:
-                sample_excerpts = "\n---\n".join(
-                    (doc.get("raw_text") or "")[:200]
-                    for doc in member_docs[:6]
-                    if doc.get("raw_text")
-                )
-                validation_prompt = (
-                    "Score this cluster on coherence (0.0-1.0). A high-quality narrative must:\n"
-                    "1. Form a single coherent theme (not a grab-bag of unrelated articles)\n"
-                    "2. Describe an ongoing market-relevant trend (not a single isolated event)\n"
-                    "3. Have a plausible financial or investment implication\n"
-                    "Score 0.0 if it fails any criterion.\n\n"
-                    "Excerpts:\n"
-                    f"{sample_excerpts}\n\n"
-                    "Respond in exactly this format:\n"
-                    "SCORE: <number> | REASON: <one sentence>"
-                )
-                validation_result = llm_client.call_haiku(
-                    "validate_cluster", narrative_id, validation_prompt
-                )
-                # Parse score from response.
-                # Default accept: new clusters get benefit of doubt on parse
-                # failure (contrast cleanup script which defaults to 0.0).
-                coherence_score = 1.0
-                if "SCORE:" in validation_result:
-                    score_part = validation_result.split("SCORE:")[1].split("|")[0].strip()
-                    try:
-                        coherence_score = float(score_part)
-                    except ValueError:
-                        pass
-
-                if coherence_score < 0.5:
-                    logger.warning(
-                        "Cluster %s failed coherence validation (score=%.2f, %d docs) — suppressing",
-                        narrative_id,
-                        coherence_score,
-                        len(member_indices),
-                    )
-                    repository.update_narrative(narrative_id, {"suppressed": 1})
-                    # Remove centroid from VectorStore so it doesn't pollute similarity search
-                    try:
-                        vector_store.delete(narrative_id)
-                    except Exception:
-                        pass
-                    # Still mark docs as clustered so they don't re-enter the buffer
-                    for doc in member_docs:
-                        repository.update_candidate_status(doc["doc_id"], "clustered", narrative_id)
-                    continue  # skip adding to new_narrative_ids
-                else:
-                    logger.info(
-                        "Cluster %s passed coherence validation (score=%.2f)",
-                        narrative_id,
-                        coherence_score,
-                    )
-            except Exception as exc:
+            coherence_score = validate_cluster_coherence(llm_client, narrative_id, member_docs)
+            _coherence_threshold = getattr(settings, 'CLUSTERING_COHERENCE_THRESHOLD', 0.5)
+            if coherence_score < _coherence_threshold:
                 logger.warning(
-                    "Cluster validation failed for %s (accepting cluster): %s",
+                    "Cluster %s failed coherence validation (score=%.2f, %d docs) — suppressing",
                     narrative_id,
-                    exc,
+                    coherence_score,
+                    len(member_indices),
+                )
+                # Mark docs as clustered so they don't re-enter the buffer.
+                # We intentionally do not persist a new narrative on failed coherence.
+                for doc in member_docs:
+                    repository.update_candidate_status(doc["doc_id"], "clustered", None)
+                continue  # skip adding to new_narrative_ids
+            else:
+                logger.info(
+                    "Cluster %s passed coherence validation (score=%.2f)",
+                    narrative_id,
+                    coherence_score,
                 )
 
-        # Store centroid snapshot (blob = raw float32 bytes, same convention as
-        # embedding_blob in candidate_buffer).
-        repository.insert_centroid_history(narrative_id, cycle_slot, centroid.tobytes())
-
-        # Record per-doc assignments, evidence, and update candidate statuses.
-        for doc in member_docs:
-            repository.record_narrative_assignment(narrative_id, today)
-            repository.update_candidate_status(doc["doc_id"], "clustered", narrative_id)
-            repository.insert_document_evidence({
-                "narrative_id": narrative_id,
-                "doc_id": doc["doc_id"],
-                "source_url": doc.get("source_url") or "",
-                "source_domain": doc.get("source_domain") or "",
-                "published_at": doc.get("published_at") or "",
-                "author": doc.get("author") or "",
-                "excerpt": (doc.get("raw_text") or "")[:500],
-            })
+        # Add centroid to vector store before DB commit; if DB fails, remove vector.
+        vector_store.add(centroid.reshape(1, -1), [narrative_id])
+        try:
+            if hasattr(repository, "atomically_persist_cluster"):
+                repository.atomically_persist_cluster(
+                    narrative=narrative,
+                    cycle_slot=cycle_slot,
+                    centroid_blob=centroid.tobytes(),
+                    member_docs=member_docs,
+                    today=today,
+                )
+            else:
+                repository.insert_narrative(narrative)
+                repository.insert_centroid_history(narrative_id, cycle_slot, centroid.tobytes())
+                for doc in member_docs:
+                    repository.record_narrative_assignment(narrative_id, today)
+                    repository.update_candidate_status(doc["doc_id"], "clustered", narrative_id)
+                    repository.insert_document_evidence({
+                        "narrative_id": narrative_id,
+                        "doc_id": doc["doc_id"],
+                        "source_url": doc.get("source_url") or "",
+                        "source_domain": doc.get("source_domain") or "",
+                        "published_at": doc.get("published_at") or "",
+                        "author": doc.get("author") or "",
+                        "excerpt": (doc.get("raw_text") or "")[:500],
+                    })
+        except Exception:
+            try:
+                vector_store.delete(narrative_id)
+            except Exception:
+                logger.warning("Failed to remove centroid after DB rollback for %s", narrative_id)
+            raise
 
         new_narrative_ids.append(narrative_id)
         logger.info(
@@ -291,6 +331,12 @@ def run_clustering(
             len(member_indices),
             label,
         )
+
+    if hasattr(repository, "verify_cluster_consistency"):
+        try:
+            repository.verify_cluster_consistency(set(vector_store.get_all_ids()))
+        except Exception as exc:
+            logger.warning("Cluster consistency check failed: %s", exc)
 
     return new_narrative_ids
 
@@ -359,10 +405,12 @@ def deduplicate_new_narratives(
                     nid_count = (nid_rec or {}).get("document_count", 0) or 0
                     match_count = (match_rec or {}).get("document_count", 0) or 0
 
-                    if match_count > nid_count:
-                        survivor_id, absorbed_id = match_id, nid
-                    else:
-                        survivor_id, absorbed_id = nid, match_id
+                    survivor_id, absorbed_id = _select_survivor_by_doc_count(
+                        nid,
+                        match_id,
+                        nid_count,
+                        match_count,
+                    )
 
                 logger.info(
                     "deduplicate_new_narratives: merging %s into %s (sim=%.3f)",
@@ -397,6 +445,8 @@ def periodic_narrative_dedup(
     threshold: float = 0.85,
     min_age_days_skip: int = 7,
     min_docs_skip: int = 100,
+    max_pairs: int | None = None,
+    return_metrics: bool = False,
 ) -> int:
     """Full pairwise dedup across all active narratives.
 
@@ -414,7 +464,7 @@ def periodic_narrative_dedup(
         ]
 
         if len(active) < 2:
-            return 0
+            return {"merge_count": 0, "pair_count": 0, "cap_hit": False} if return_metrics else 0
 
         centroids: dict[str, np.ndarray] = {}
         records: dict[str, dict] = {}
@@ -443,10 +493,20 @@ def periodic_narrative_dedup(
             centroids[narrative_id] = arr
 
         if len(centroids) < 2:
-            return 0
+            return {"merge_count": 0, "pair_count": 0, "cap_hit": False} if return_metrics else 0
 
+        if max_pairs is None:
+            max_pairs_env = os.getenv("PERIODIC_DEDUP_MAX_PAIRS", "").strip()
+            try:
+                max_pairs = max(1, int(max_pairs_env)) if max_pairs_env else 20000
+            except Exception:
+                max_pairs = 20000
+        else:
+            max_pairs = max(1, int(max_pairs))
         merged_ids: set[str] = set()
         merge_count = 0
+        pair_count = 0
+        cap_hit = False
 
         for i, narrative_1 in enumerate(active):
             narrative_id_1 = narrative_1["narrative_id"]
@@ -477,16 +537,34 @@ def periodic_narrative_dedup(
                     and docs_1 >= min_docs_skip and docs_2 >= min_docs_skip
                 ):
                     continue
+                pair_count += 1
+                if pair_count > max_pairs:
+                    cap_hit = True
+                    logger.warning(
+                        "periodic_narrative_dedup: pair cap reached pairs=%d max_pairs=%d merged=%d",
+                        pair_count - 1,
+                        max_pairs,
+                        merge_count,
+                    )
+                    return (
+                        {"merge_count": merge_count, "pair_count": pair_count - 1, "cap_hit": True}
+                        if return_metrics
+                        else merge_count
+                    )
 
                 sim = float(np.dot(centroids[narrative_id_1], centroids[narrative_id_2]))
                 if sim < threshold:
                     continue
 
-                if docs_1 >= docs_2:
-                    survivor_id, absorbed_id = narrative_id_1, narrative_id_2
+                survivor_id, absorbed_id = _select_survivor_by_doc_count(
+                    narrative_id_1,
+                    narrative_id_2,
+                    docs_1,
+                    docs_2,
+                )
+                if survivor_id == narrative_id_1:
                     survivor_name, absorbed_name = rec_1.get("name"), rec_2.get("name")
                 else:
-                    survivor_id, absorbed_id = narrative_id_2, narrative_id_1
                     survivor_name, absorbed_name = rec_2.get("name"), rec_1.get("name")
 
                 try:
@@ -512,8 +590,18 @@ def periodic_narrative_dedup(
                         absorbed_id, survivor_id, exc,
                     )
 
-        return merge_count
+        logger.info(
+            "periodic_narrative_dedup: completed pairs=%d cap_hit=%s merged=%d",
+            pair_count,
+            cap_hit,
+            merge_count,
+        )
+        return (
+            {"merge_count": merge_count, "pair_count": pair_count, "cap_hit": cap_hit}
+            if return_metrics
+            else merge_count
+        )
 
     except Exception as exc:
         logger.error("periodic_narrative_dedup failed: %s", exc, exc_info=True)
-        return 0
+        return {"merge_count": 0, "pair_count": 0, "cap_hit": False} if return_metrics else 0

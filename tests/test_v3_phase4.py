@@ -61,7 +61,7 @@ _repo.migrate()
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 result = conn.execute("PRAGMA journal_mode").fetchone()
-T("WAL-1: journal mode is usable", result[0] in ("wal", "off"), f"mode={result[0]}")
+T("WAL-1: journal mode is WAL or DELETE (never OFF)", result[0] in ("wal", "delete"), f"mode={result[0]}")
 
 # Check indexes
 S("V3-IDX: Performance indexes")
@@ -121,6 +121,7 @@ endpoints = [
     ("GET", "/api/correlations/top?limit=3", 200),
     ("GET", "/api/portfolio", 200),
     ("GET", "/api/portfolio/exposure", 200),
+    ("GET", "/api/alerts/count", 200),
     ("GET", "/api/earnings/upcoming", 200),
 ]
 

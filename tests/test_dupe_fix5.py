@@ -24,6 +24,7 @@ Section 13: Unlabeled cluster cleanup script
   T18: Relevance gate integrated
 """
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -75,7 +76,8 @@ T(
 
 T(
     "T4: Suppression threshold remains 0.5",
-    "coherence_score < 0.5" in clustering_src,
+    "coherence_score < 0.5" in clustering_src
+    or ("_coherence_threshold" in clustering_src and "0.5" in clustering_src),
 )
 
 # ===========================================================================
@@ -136,10 +138,19 @@ T(
 # ===========================================================================
 S("Section 13: Unlabeled Cluster Cleanup Script")
 
+cleanup_script_path = Path(
+    _ROOT, "prod_plan", "fixes_complete", "cleanup_unlabeled_clusters.py"
+)
+
 # Verify the script is importable
 try:
-    import importlib
-    mod = importlib.import_module("cleanup_unlabeled_clusters")
+    spec = importlib.util.spec_from_file_location(
+        "cleanup_unlabeled_clusters", cleanup_script_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("Unable to load cleanup_unlabeled_clusters spec")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
     script_importable = hasattr(mod, "main")
 except Exception as exc:
     script_importable = False
@@ -147,7 +158,7 @@ except Exception as exc:
 T("T13: Cleanup script exists and has main()", script_importable)
 
 # Verify the script uses the enhanced coherence prompt
-script_src = Path(_ROOT, "cleanup_unlabeled_clusters.py").read_text(encoding="utf-8")
+script_src = cleanup_script_path.read_text(encoding="utf-8")
 
 T(
     "T14: Script uses enhanced coherence prompt",

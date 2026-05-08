@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Search, ArrowUp, ArrowDown, Minus, Telescope, Radar } from "lucide-react";
+import { Search, ArrowUp, ArrowDown, Minus, Telescope, Radar, Star } from "lucide-react";
 import type { VisibleNarrative } from "@/lib/api";
+import { useWatchlist } from "@/contexts/WatchlistContext";
 import VelocitySparkline from "./VelocitySparkline";
 import MomentumBar from "./MomentumBar";
 import MiniAreaChart from "./MiniAreaChart";
@@ -22,7 +23,7 @@ function parseVelocity(summary: string): number {
   return match ? parseFloat(match[1]) : 0;
 }
 
-/** Semantic velocity color: warm (accelerating), neutral (stable), cool (decelerating) */
+/** Semantic velocity color thresholds: >=5 accelerating, <-0.5 decelerating, else stable. */
 function velSemanticColor(summary: string): string {
   const val = parseVelocity(summary);
   if (val >= 5) return "var(--vel-accelerating)";
@@ -30,7 +31,7 @@ function velSemanticColor(summary: string): string {
   return "var(--vel-stable)";
 }
 
-/** Is this an accelerating signal? (for pulse animation) */
+/** Pulse animation threshold: accelerating when parsed velocity is >= 5. */
 function isAccelerating(summary: string): boolean {
   return parseVelocity(summary) >= 5;
 }
@@ -130,7 +131,7 @@ function MiniTrendBars({ timeseries, color }: { timeseries: { date: string; valu
     <div className="flex items-end gap-px" style={{ height: 16, width: 28 }}>
       {values.map((v, i) => (
         <div
-          key={i}
+          key={`${timeseries[timeseries.length - values.length + i]?.date ?? "d"}-${v}`}
           style={{
             width: 3,
             height: Math.max(2, (v / max) * 16),
@@ -153,6 +154,8 @@ function HeroCard({
   narrative: VisibleNarrative;
   onInvestigateClick?: (id: string) => void;
 }) {
+  const { isWatched, toggleWatch } = useWatchlist();
+  const watched = isWatched(narrative.id);
   const [expanded, setExpanded] = useState(false);
   const velColor = velSemanticColor(narrative.velocity_summary);
   const { text: ctaLabel, icon: CtaIcon } = ctaText(narrative);
@@ -173,7 +176,7 @@ function HeroCard({
   return (
     <article
       className="overflow-hidden cursor-pointer transition-all hover:bg-[var(--accent-primary-hover)]"
-      style={{ borderLeft: `2px solid ${velColor}`, borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
+      style={{ borderLeft: `2px solid ${velColor}`, borderBottom: "1px solid var(--border-subtle-soft)" }}
       onClick={handleInvestigate}
       aria-label={`Narrative: ${narrative.name}`}
       tabIndex={0}
@@ -184,6 +187,18 @@ function HeroCard({
         <div className="p-5 flex flex-col">
           {/* Stage + topics row */}
           <div className="flex items-center gap-3 mb-3">
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleWatch("narrative", narrative.id); }}
+              className="shrink-0"
+              style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+              aria-label={watched ? "Remove from watchlist" : "Add to watchlist"}
+            >
+              <Star
+                size={16}
+                fill={watched ? "var(--intent-warning)" : "none"}
+                stroke={watched ? "var(--intent-warning)" : "var(--text-disabled)"}
+              />
+            </button>
             {narrative.stage && (
               <span
                 data-testid="stage-badge"
@@ -252,7 +267,7 @@ function HeroCard({
         </div>
 
         {/* RIGHT COLUMN: data */}
-        <div className="p-5 flex flex-col" style={{ borderLeft: "1px solid rgba(56, 62, 71, 0.13)" }}>
+        <div className="p-5 flex flex-col" style={{ borderLeft: "1px solid var(--border-subtle-soft)" }}>
           {/* Velocity number — the hero */}
           <div className="flex items-center gap-3 mb-3">
             <DirectionArrow summary={narrative.velocity_summary} />
@@ -359,6 +374,8 @@ function SecondaryCard({
   showSummary?: boolean;
   onInvestigateClick?: (id: string) => void;
 }) {
+  const { isWatched, toggleWatch } = useWatchlist();
+  const watched = isWatched(narrative.id);
   const vel = parseVelocity(narrative.velocity_summary);
   const velColor = velSemanticColor(narrative.velocity_summary);
   const [hoverCta, setHoverCta] = useState(false);
@@ -370,7 +387,7 @@ function SecondaryCard({
   return (
     <article
       className="p-4 cursor-pointer transition-all hover:bg-[var(--accent-primary-hover)]"
-      style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
+      style={{ borderBottom: "1px solid var(--border-subtle-soft)" }}
       onClick={handleInvestigate}
       onMouseEnter={() => setHoverCta(true)}
       onMouseLeave={() => setHoverCta(false)}
@@ -380,6 +397,18 @@ function SecondaryCard({
     >
       <div className="flex items-start justify-between gap-2 mb-1">
         <div className="flex items-center gap-2 min-w-0">
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleWatch("narrative", narrative.id); }}
+            className="shrink-0"
+            style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+            aria-label={watched ? "Remove from watchlist" : "Add to watchlist"}
+          >
+            <Star
+              size={14}
+              fill={watched ? "var(--intent-warning)" : "none"}
+              stroke={watched ? "var(--intent-warning)" : "var(--text-disabled)"}
+            />
+          </button>
           <h3
             className="text-text-primary font-medium leading-snug line-clamp-2"
             style={{ fontSize: 15, fontFamily: "var(--font-display)", letterSpacing: "-0.01em" }}
@@ -606,7 +635,7 @@ function DefaultCard({
   return (
     <article
       className="rounded-sm p-5 flex flex-col gap-3 transition-all cursor-pointer relative overflow-hidden hover:bg-[var(--accent-primary-hover)]"
-      style={{ borderBottom: "1px solid rgba(56, 62, 71, 0.13)" }}
+      style={{ borderBottom: "1px solid var(--border-subtle-soft)" }}
       onClick={handleInvestigate}
       aria-label={`Narrative: ${narrative.name}`}
     >
@@ -742,3 +771,4 @@ export default function NarrativeCard({
       return <DefaultCard narrative={narrative} onInvestigateClick={onInvestigateClick} />;
   }
 }
+

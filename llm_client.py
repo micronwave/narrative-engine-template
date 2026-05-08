@@ -5,6 +5,8 @@ constitute advice.
 """
 
 import logging
+import random
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +17,9 @@ from repository import Repository
 from settings import Settings
 
 logger = logging.getLogger(__name__)
+_RATE_LIMIT_ERROR = getattr(anthropic, "RateLimitError", anthropic.APIError)
+_API_CONNECTION_ERROR = getattr(anthropic, "APIConnectionError", anthropic.APIError)
+_INTERNAL_SERVER_ERROR = getattr(anthropic, "InternalServerError", anthropic.APIError)
 
 
 class BudgetExceededError(Exception):
@@ -22,10 +27,10 @@ class BudgetExceededError(Exception):
     pass
 
 
-# Pricing as of 2026-03. Source: https://docs.anthropic.com/en/docs/about-claude/pricing
+# Pricing as of 2026-05-04. Source: https://www.anthropic.com/pricing
 # Prices per 1M tokens in USD
-HAIKU_INPUT_PRICE_PER_M = 0.80
-HAIKU_OUTPUT_PRICE_PER_M = 4.00
+HAIKU_INPUT_PRICE_PER_M = 1.00
+HAIKU_OUTPUT_PRICE_PER_M = 5.00
 SONNET_INPUT_PRICE_PER_M = 3.00
 SONNET_OUTPUT_PRICE_PER_M = 15.00
 # NOTE: These are for claude-haiku-4-5-20251001 and claude-sonnet-4-6
@@ -96,7 +101,7 @@ def parse_signal_json(text: str, fallback: str | None = None) -> dict:
                             pass
                         break
             i = start + 1
-    except Exception:
+    except (TypeError, ValueError):
         pass
 
     # Tier 3: final fallback
@@ -120,7 +125,63 @@ class LlmClient:
     def __init__(self, settings: Settings, repository: Repository) -> None:
         self._settings = settings
         self._repository = repository
-        self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self._consecutive_transport_errors = 0
+        self._init_client()
+
+    def _init_client(self) -> None:
+        """Initialize/recreate Anthropic SDK client."""
+        self._client = anthropic.Anthropic(
+            api_key=self._settings.ANTHROPIC_API_KEY,
+            timeout=float(self._settings.ANTHROPIC_TIMEOUT_SECONDS),
+        )
+
+    def _log_retry_attempt(
+        self,
+        narrative_id: str,
+        task_type: str,
+        attempt: int,
+        reason: str,
+        delay_seconds: float,
+    ) -> None:
+        """Best-effort audit trail for retry attempts."""
+        try:
+            self._repository.log_llm_call(
+                {
+                    "call_id": str(uuid.uuid4()),
+                    "narrative_id": narrative_id,
+                    "model": "audit_event",
+                    "task_type": task_type,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_estimate_usd": 0.0,
+                    "called_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except sqlite3.Error as exc:
+            logger.warning("Could not write retry audit log (%s): %s", task_type, exc)
+        logger.warning(
+            "Retrying after %s for %s (attempt %d/3) in %.2fs",
+            reason,
+            narrative_id,
+            attempt,
+            delay_seconds,
+        )
+
+    def _record_transport_failure(self) -> None:
+        """Track consecutive transport failures and recreate client when needed."""
+        self._consecutive_transport_errors = getattr(
+            self, "_consecutive_transport_errors", 0
+        ) + 1
+        if self._consecutive_transport_errors >= 2:
+            logger.warning(
+                "Recreating Anthropic client after %d consecutive transport errors",
+                self._consecutive_transport_errors,
+            )
+            self._init_client()
+            self._consecutive_transport_errors = 0
+
+    def _reset_transport_failure_counter(self) -> None:
+        self._consecutive_transport_errors = 0
 
     # ------------------------------------------------------------------
     # Token estimation
@@ -139,24 +200,28 @@ class LlmClient:
         narrative_id: str,
         narrative_created_at: str,
         estimated_tokens: int,
+        skip_ns_gate: bool = False,
     ) -> tuple[bool, str]:
         """
         Check all 4 Sonnet gates in order 1→4.
         Returns (all_passed, reason_if_failed).
         """
         # Gate 1: ns_score > CONFIDENCE_ESCALATION_THRESHOLD
-        narrative = self._repository.get_narrative(narrative_id)
-        if narrative is None:
-            return False, "gate_1_narrative_not_found"
-        ns_score = float(narrative.get("ns_score") or 0.0)
-        if ns_score <= self._settings.CONFIDENCE_ESCALATION_THRESHOLD:
-            logger.debug(
-                "Sonnet gate 1 failed for %s: ns_score=%.4f <= threshold=%.4f",
-                narrative_id,
-                ns_score,
-                self._settings.CONFIDENCE_ESCALATION_THRESHOLD,
-            )
-            return False, f"gate_1_ns_score: {ns_score:.4f}"
+        if not skip_ns_gate:
+            narrative = self._repository.get_narrative(narrative_id)
+            if narrative is None:
+                return False, "gate_1_narrative_not_found"
+            ns_score = float(narrative.get("ns_score") or 0.0)
+            if ns_score <= self._settings.CONFIDENCE_ESCALATION_THRESHOLD:
+                logger.debug(
+                    "Sonnet gate 1 failed for %s: ns_score=%.4f <= threshold=%.4f",
+                    narrative_id,
+                    ns_score,
+                    self._settings.CONFIDENCE_ESCALATION_THRESHOLD,
+                )
+                return False, f"gate_1_ns_score: {ns_score:.4f}"
+        else:
+            logger.info("Sonnet gate 1 bypassed for %s (mutation escalation)", narrative_id)
 
         # Gate 2: narrative age >= 2 consecutive daily cycles
         from signals import get_narrative_age_days
@@ -244,9 +309,10 @@ class LlmClient:
                         "called_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+                self._reset_transport_failure_counter()
                 return result_text
 
-            except Exception as exc:
+            except (anthropic.APIError, TimeoutError, OSError, ValueError) as exc:
                 last_exc = exc
                 if attempt < 2:
                     delay = backoff_delays[attempt]
@@ -267,6 +333,10 @@ class LlmClient:
             task_type,
             last_exc,
         )
+        if isinstance(last_exc, (_API_CONNECTION_ERROR, TimeoutError, OSError)):
+            self._record_transport_failure()
+        else:
+            self._reset_transport_failure_counter()
         self._log_pipeline_error(
             step_name=f"haiku_call_failed:{task_type}",
             error_message=str(last_exc),
@@ -277,13 +347,23 @@ class LlmClient:
     # Sonnet calls
     # ------------------------------------------------------------------
 
-    def call_sonnet(self, narrative_id: str, prompt: str) -> str | None:
+    def call_sonnet(
+        self,
+        narrative_id: str,
+        prompt: str,
+        skip_ns_gate: bool = False,
+        bypass_gate_1: bool | None = None,
+    ) -> str | None:
         """
         Check all 4 gates, execute Sonnet if passed.
+        Set skip_ns_gate=True for mutation escalations that should skip ns_score gate.
         Returns None if gates 1–3 fail (narrative not yet eligible).
         Falls back to Haiku summarize_mutation_fallback if gate 4 (budget) fails.
         Falls back to Haiku summarize_mutation_fallback if API call fails.
         """
+        if bypass_gate_1 is not None:
+            skip_ns_gate = skip_ns_gate or bypass_gate_1
+
         narrative = self._repository.get_narrative(narrative_id)
         if narrative is None:
             logger.warning("call_sonnet: narrative %s not found in repository", narrative_id)
@@ -293,8 +373,25 @@ class LlmClient:
         # Conservative token estimate: input prompt + max output tokens
         estimated_tokens = self.estimate_tokens(prompt) + self._settings.SONNET_MAX_TOKENS
 
+        if skip_ns_gate:
+            self._repository.log_llm_call(
+                {
+                    "call_id": str(uuid.uuid4()),
+                    "narrative_id": narrative_id,
+                    "model": "audit_event",
+                    "task_type": "mutation_gate_1_bypass",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_estimate_usd": 0.0,
+                    "called_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
         passed, reason = self.check_sonnet_gates(
-            narrative_id, narrative_created_at, estimated_tokens
+            narrative_id,
+            narrative_created_at,
+            estimated_tokens,
+            skip_ns_gate=skip_ns_gate,
         )
 
         if not passed:
@@ -328,53 +425,92 @@ class LlmClient:
             logger.debug("Sonnet gates failed for %s: %s", narrative_id, reason)
             return None
 
-        # All gates passed — attempt Sonnet call
-        try:
-            response = self._client.messages.create(
-                model=self._settings.SONNET_MODEL,
-                max_tokens=self._settings.SONNET_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result_text = response.content[0].text if response.content else ""
+        # All gates passed — attempt Sonnet call (up to 3 attempts).
+        last_exc: Exception | None = None
+        attempts_made = 0
+        for attempt in range(3):
+            attempts_made = attempt + 1
+            try:
+                response = self._client.messages.create(
+                    model=self._settings.SONNET_MODEL,
+                    max_tokens=self._settings.SONNET_MAX_TOKENS,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                result_text = response.content[0].text if response.content else ""
 
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
-            cost = (
-                (input_tokens * SONNET_INPUT_PRICE_PER_M / 1_000_000)
-                + (output_tokens * SONNET_OUTPUT_PRICE_PER_M / 1_000_000)
-            )
-            self._repository.log_llm_call(
-                {
-                    "call_id": str(uuid.uuid4()),
-                    "narrative_id": narrative_id,
-                    "model": self._settings.SONNET_MODEL,
-                    "task_type": "mutation_analysis",
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cost_estimate_usd": cost,
-                    "called_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+                input_tokens = response.usage.input_tokens
+                output_tokens = response.usage.output_tokens
+                cost = (
+                    (input_tokens * SONNET_INPUT_PRICE_PER_M / 1_000_000)
+                    + (output_tokens * SONNET_OUTPUT_PRICE_PER_M / 1_000_000)
+                )
+                self._repository.log_llm_call(
+                    {
+                        "call_id": str(uuid.uuid4()),
+                        "narrative_id": narrative_id,
+                        "model": self._settings.SONNET_MODEL,
+                        "task_type": "mutation_analysis",
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_estimate_usd": cost,
+                        "called_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
 
-            today_str = datetime.now(timezone.utc).date().isoformat()
-            # TODO SCALE: replace SQLite counter with Redis INCR for atomic budget tracking under concurrent workers
-            self._repository.update_sonnet_daily_spend(
-                today_str, input_tokens + output_tokens, 1
-            )
+                today_str = datetime.now(timezone.utc).date().isoformat()
+                self._repository.update_sonnet_daily_spend(
+                    today_str, input_tokens + output_tokens, 1
+                )
+                self._reset_transport_failure_counter()
+                return result_text
+            except _RATE_LIMIT_ERROR as exc:
+                last_exc = exc
+                if attempt == 2:
+                    break
+                base = 4.0
+                delay = max(0.1, base + random.uniform(-0.2 * base, 0.2 * base))
+                self._log_retry_attempt(
+                    narrative_id=narrative_id,
+                    task_type="mutation_analysis_retry_rate_limit",
+                    attempt=attempt + 1,
+                    reason="rate_limit_429",
+                    delay_seconds=delay,
+                )
+                time.sleep(delay)
+            except (_API_CONNECTION_ERROR, _INTERNAL_SERVER_ERROR, TimeoutError, OSError) as exc:
+                last_exc = exc
+                if attempt == 2:
+                    break
+                base = float(2 ** attempt)
+                delay = max(0.1, base + random.uniform(-0.2 * base, 0.2 * base))
+                self._log_retry_attempt(
+                    narrative_id=narrative_id,
+                    task_type="mutation_analysis_retry_transport",
+                    attempt=attempt + 1,
+                    reason=type(exc).__name__,
+                    delay_seconds=delay,
+                )
+                time.sleep(delay)
+            except (anthropic.APIError, ValueError) as exc:
+                last_exc = exc
+                break
 
-            return result_text
+        if isinstance(last_exc, (_API_CONNECTION_ERROR, TimeoutError, OSError)):
+            self._record_transport_failure()
+        else:
+            self._reset_transport_failure_counter()
 
-        except Exception as exc:
-            logger.error(
-                "Sonnet call failed for %s after passing all gates: %s — falling back to Haiku",
-                narrative_id,
-                exc,
-            )
-            self._log_pipeline_error(
-                step_name="sonnet_call_failed",
-                error_message=str(exc),
-            )
-            return self.call_haiku("summarize_mutation_fallback", narrative_id, prompt)
+        logger.error(
+            "Sonnet call failed for %s after %d attempt(s): %s — falling back to Haiku",
+            narrative_id,
+            attempts_made,
+            last_exc,
+        )
+        self._log_pipeline_error(
+            step_name="sonnet_call_failed",
+            error_message=str(last_exc),
+        )
+        return self.call_haiku("summarize_mutation_fallback", narrative_id, prompt)
 
     # ------------------------------------------------------------------
     # Haiku chat (multi-turn)
@@ -414,7 +550,7 @@ class LlmClient:
                 "tokens": input_tokens + output_tokens,
                 "cost": cost,
             }
-        except Exception as exc:
+        except (anthropic.APIError, TimeoutError, OSError, ValueError) as exc:
             logger.warning("call_haiku_chat failed: %s", exc)
             return {"content": "I'm unable to process that request right now.", "tokens": 0, "cost": 0.0}
 
@@ -444,5 +580,5 @@ class LlmClient:
                     "run_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             logger.warning("Could not write pipeline_run_log for %s: %s", step_name, exc)

@@ -84,8 +84,8 @@ def _print_summary() -> None:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from api.main import (  # noqa: E402
-    app,
+from api.main import app  # noqa: E402
+from api.app_legacy import (  # noqa: E402
     limiter,
     _sse_connections,
     _sse_per_user,
@@ -97,7 +97,7 @@ from api.main import (  # noqa: E402
 client = TestClient(app)
 
 # Source code for structural checks
-main_py = Path(__file__).parent.parent / "api" / "main.py"
+main_py = Path(__file__).parent.parent / "api" / "app_legacy.py"
 main_source = main_py.read_text(encoding="utf-8")
 llm_source = (Path(__file__).parent.parent / "llm_client.py").read_text(encoding="utf-8")
 repo_source = (Path(__file__).parent.parent / "repository.py").read_text(encoding="utf-8")
@@ -267,7 +267,7 @@ S("C4: Analyze endpoint exception handling")
 
 # Find the analyze endpoint's LLM call block
 _analyze_region = main_source[main_source.find("fallback_json = '{\"thesis\":"):]
-_analyze_block = _analyze_region[:600]
+_analyze_block = _analyze_region[:750]
 
 T(
     "analyze endpoint imports BudgetExceededError",
@@ -304,20 +304,33 @@ S("C6: SSE tracking variables")
 
 T(
     "_sse_connections importable",
-    "_sse_connections" in dir(sys.modules.get("api.main", None) or __import__("api.main")),
-    "variable not found in api.main",
+    "_sse_connections" in dir(sys.modules.get("api.app_legacy", None) or __import__("api.app_legacy")),
+    "variable not found in api.app_legacy",
 )
 
 T(
-    "_SSE_MAX_GLOBAL == 100",
-    _SSE_MAX_GLOBAL == 100,
-    f"got {_SSE_MAX_GLOBAL}",
+    "SSE_MAX_GLOBAL default is 100 in settings.py",
+    "SSE_MAX_GLOBAL: int = 100" in settings_source,
+    "Expected SSE_MAX_GLOBAL default to be 100",
 )
 
 T(
-    "_SSE_MAX_PER_USER == 5",
-    _SSE_MAX_PER_USER == 5,
-    f"got {_SSE_MAX_PER_USER}",
+    "SSE_MAX_PER_USER default is 5 in settings.py",
+    "SSE_MAX_PER_USER: int = 5" in settings_source,
+    "Expected SSE_MAX_PER_USER default to be 5",
+)
+
+T(
+    "api/main.py wires SSE limits from settings",
+    "_SSE_MAX_GLOBAL = int(_API_SETTINGS.SSE_MAX_GLOBAL)" in main_source
+    and "_SSE_MAX_PER_USER = int(_API_SETTINGS.SSE_MAX_PER_USER)" in main_source,
+    "Expected module-level aliases sourced from API settings",
+)
+
+T(
+    "runtime SSE limits are positive",
+    _SSE_MAX_GLOBAL > 0 and _SSE_MAX_PER_USER > 0,
+    f"global={_SSE_MAX_GLOBAL}, per_user={_SSE_MAX_PER_USER}",
 )
 
 T(
@@ -349,8 +362,9 @@ T(
 
 T(
     "broadcast loop updates _latest_ticker_payload",
-    "_latest_ticker_payload" in main_source.split("def _sse_broadcast_loop")[1][:500],
-    "_latest_ticker_payload not updated in broadcast loop",
+    "_latest_ticker_payload" in main_source.split("def _sse_broadcast_loop")[1][:700]
+    or "_app_state.latest_ticker_payload" in main_source.split("def _sse_broadcast_loop")[1][:700],
+    "shared payload not updated in broadcast loop",
 )
 
 # ---------------------------------------------------------------------------
@@ -398,7 +412,7 @@ T(
 
 T(
     "stream endpoint reads _latest_ticker_payload",
-    "_latest_ticker_payload" in _stream_body,
+    "_latest_ticker_payload" in _stream_body or "_app_state.latest_ticker_payload" in _stream_body,
     "shared payload not used in stream generator",
 )
 
@@ -442,7 +456,10 @@ T(
 # Verify connection decrement uses max(0, ...) to prevent negative counts
 T(
     "connection decrement prevents negative counts",
-    "max(0, _sse_connections - 1)" in _stub_block or "max(0, _sse_connections - 1)" in main_source,
+    "max(0, _sse_connections - 1)" in _stub_block
+    or "max(0, _sse_connections - 1)" in main_source
+    or "max(0, _app_state.sse_connections - 1)" in _stub_block
+    or "max(0, _app_state.sse_connections - 1)" in main_source,
     "max(0, ...) guard not found",
 )
 

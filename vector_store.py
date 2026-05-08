@@ -83,10 +83,26 @@ class VectorStore(ABC):
         """Return True if the index contains zero vectors."""
         ...
 
+    def batch_search(
+        self, query_matrix: np.ndarray
+    ) -> list[tuple[float, str | None]]:
+        """
+        Search for the nearest neighbor for each row in query_matrix (N, dim).
+        Returns a list of (distance, id) pairs, one per query row.
+        id is None when the index is empty or no valid neighbor is found.
+        Default implementation falls back to per-row search().
+        """
+        results: list[tuple[float, str | None]] = []
+        for row in query_matrix:
+            distances, ids = self.search(row, k=1)
+            if ids:
+                results.append((float(distances[0]), ids[0]))
+            else:
+                results.append((0.0, None))
+        return results
+
 
 class FaissVectorStore(VectorStore):
-    # TODO SCALE: swap FaissVectorStore for PgVectorStore or PineconeVectorStore when moving to AWS
-
     def __init__(self, index_path: str) -> None:
         self._index_path = index_path
         self.index: faiss.IndexFlatIP | None = None
@@ -257,3 +273,22 @@ class FaissVectorStore(VectorStore):
     def is_empty(self) -> bool:
         """Return True if the index contains zero vectors."""
         return self.count() == 0
+
+    def batch_search(
+        self, query_matrix: np.ndarray
+    ) -> list[tuple[float, str | None]]:
+        """Single FAISS call for all queries; returns (distance, id) per row."""
+        if self.is_empty() or len(query_matrix) == 0:
+            return [(0.0, None)] * len(query_matrix)
+        queries = np.array(query_matrix, dtype=np.float32)
+        if queries.ndim == 1:
+            queries = queries.reshape(1, -1)
+        distances, indices = self.index.search(queries, 1)
+        results: list[tuple[float, str | None]] = []
+        for dist_row, idx_row in zip(distances, indices):
+            idx = int(idx_row[0])
+            if idx == -1 or idx >= len(self.index_to_id):
+                results.append((0.0, None))
+            else:
+                results.append((float(dist_row[0]), self.index_to_id[idx]))
+        return results

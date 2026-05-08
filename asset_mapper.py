@@ -1,4 +1,3 @@
-import json
 import logging
 from pathlib import Path
 
@@ -77,6 +76,9 @@ class AssetMapper:
 
         if embeddings:
             matrix = np.stack(embeddings).astype(np.float32)
+            # Invariant: asset-library vectors are pre-normalized at build time;
+            # map_narrative() normalizes query centroids before search.
+            # IndexFlatIP therefore acts as cosine similarity via inner product.
             self._index: faiss.IndexFlatIP | None = faiss.IndexFlatIP(pipeline_dim)
             self._index.add(matrix)
             logger.info("AssetMapper: loaded %d assets (dim=%d)", len(self._tickers), pipeline_dim)
@@ -95,6 +97,7 @@ class AssetMapper:
         """
         Find matching assets for a narrative centroid using cosine similarity
         (dot product on L2-normalized vectors).
+        This method normalizes the query centroid before searching the FAISS index.
 
         If topic_tags specify a narrow domain and sector_map is provided,
         tickers whose sector is irrelevant to the topic are suppressed.
@@ -110,8 +113,9 @@ class AssetMapper:
         if norm == 0:
             return []
         query = query / norm
-        k = min(top_k, self._index.ntotal)
-        distances, indices = self._index.search(query, k)
+        # Retrieve an expanded window so TOPIC: filtering cannot starve security results
+        k_fetch = min(max(top_k * 3, top_k + 10), self._index.ntotal)
+        distances, indices = self._index.search(query, k_fetch)
 
         # Determine allowed sectors from topic_tags
         allowed_sectors: set[str] | None = None
@@ -148,6 +152,8 @@ class AssetMapper:
                     "similarity_score": sim,
                 }
             )
+            if len(results) >= top_k:
+                break
         return results
 
     def get_all_tickers(self) -> list[str]:

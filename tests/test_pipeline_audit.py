@@ -247,6 +247,51 @@ with tempfile.TemporaryDirectory() as tmpdir:
       os.path.isdir(f"{tmpdir}/sub/deep"))
 
 
+# ─── Batch FAISS search (P12 Batch 2.4) ────────────────────────────────
+
+S("VectorStore: batch_search correctness")
+
+from vector_store import FaissVectorStore
+import tempfile as _tempfile
+
+def _make_vs(dim: int = 4):
+    tmp = _tempfile.mktemp(suffix=".pkl")
+    vs = FaissVectorStore(tmp)
+    vs.initialize(dim)
+    return vs
+
+_vs = _make_vs(4)
+_v1 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+_v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+_v3 = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+_vs.add(np.stack([_v1, _v2, _v3]), ["id1", "id2", "id3"])
+
+# batch_search on empty store
+_empty_vs = _make_vs(4)
+_empty_res = _empty_vs.batch_search(np.stack([_v1]))
+T("batch_search on empty store returns (0.0, None)",
+  len(_empty_res) == 1 and _empty_res[0] == (0.0, None),
+  f"got {_empty_res}")
+
+# batch results match single search
+_q = np.array([0.9, 0.1, 0.0, 0.0], dtype=np.float32)  # closest to id1
+_batch = _vs.batch_search(np.stack([_q]))
+_single_dist, _single_ids = _vs.search(_q, k=1)
+T("batch_search nearest matches single search result",
+  len(_batch) == 1 and _batch[0][1] == (_single_ids[0] if _single_ids else None),
+  f"batch={_batch[0]}, single=({_single_dist}, {_single_ids})")
+
+# multiple queries in one call
+_queries = np.stack([_v1, _v2, _v3])
+_multi = _vs.batch_search(_queries)
+T("batch_search returns one result per query row",
+  len(_multi) == 3,
+  f"got {len(_multi)} results")
+T("batch_search per-row nearest: id1→id1, id2→id2, id3→id3",
+  _multi[0][1] == "id1" and _multi[1][1] == "id2" and _multi[2][1] == "id3",
+  f"got {[r[1] for r in _multi]}")
+
+
 # ─── Report ─────────────────────────────────────────────────────────────
 
 success = report()

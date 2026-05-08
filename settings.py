@@ -1,6 +1,4 @@
 from pathlib import Path
-from typing import Annotated
-
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -10,6 +8,7 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     ANTHROPIC_API_KEY: str
+    ANTHROPIC_TIMEOUT_SECONDS: int = 60
     HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
     SONNET_MODEL: str = "claude-sonnet-4-6"
     HAIKU_MAX_TOKENS: int = 512
@@ -25,11 +24,14 @@ class Settings(BaseSettings):
     CENTROID_ALPHA: float = 0.15
     NOISE_BUFFER_THRESHOLD: int = 300
     ASSIGNMENT_SIMILARITY_FLOOR: float = 0.55
-    CONFIDENCE_ESCALATION_THRESHOLD: float = 0.35
+    CONFIDENCE_ESCALATION_THRESHOLD: float = 0.50  # NS score threshold for Sonnet escalation
     VELOCITY_WINDOW_DAYS: int = 7
     ENTROPY_VOCAB_WINDOW: int = 10
+    ENTROPY_MIN_VOCAB_SIZE: int = 3
     HDBSCAN_MIN_CLUSTER_SIZE: int = 8
     HDBSCAN_MIN_SAMPLES: int = 5
+    CLUSTER_MAX_PENDING_BATCH: int = 120
+    PERIODIC_DEDUP_MAX_PAIRS: int = 20000
 
     # --- Asset mapping ---
     ASSET_MAPPING_MIN_SIMILARITY: float = 0.60
@@ -82,6 +84,7 @@ class Settings(BaseSettings):
     BURST_VELOCITY_ALERT_RATIO: float = 3.0
     SIGNAL_EXTRACTION_STALENESS_HOURS: int = 24
     CONVERGENCE_INDEPENDENCE_THRESHOLD: float = 0.30
+    SIGNAL_EVIDENCE_LIMIT: int = 500
 
     # --- Phase 4: Catalyst anchoring ---
     FRED_API_KEY: str = ""
@@ -120,11 +123,39 @@ class Settings(BaseSettings):
 
     # --- Environment ---
     ENVIRONMENT: str = "development"
+    CORS_ORIGINS: str = "http://localhost:3000"
+    DISABLE_BACKGROUND_TASKS: bool = False
 
     # --- Auth ---
     AUTH_MODE: str = "stub"
     JWT_SECRET_KEY: str = ""
-    JWT_EXPIRY_HOURS: int = 24
+    JWT_EXPIRY_HOURS: int = 2
+    AUTH_REQUIRED_FOR_USER_STATE: bool = True
+    STUB_AUTH_TOKEN: str = "stub-auth-token"
+    SSE_MAX_GLOBAL: int = 100
+    SSE_MAX_PER_USER: int = 5
+    LOGIN_MAX_ATTEMPTS: int = 5
+    LOGIN_WINDOW_SECONDS: int = 900
+
+    # --- API request limiting ---
+    RATE_LIMIT_ENABLED: bool = False
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 100
+
+    # --- Sentiment refresh ---
+    SENTIMENT_SOCIAL_REFRESH_SECONDS: int = 900
+    SENTIMENT_COMPOSITE_REFRESH_SECONDS: int = 3600
+
+    # --- Pipeline tuning constants ---
+    CLUSTERING_COHERENCE_THRESHOLD: float = 0.5
+    PIPELINE_FAILED_JOB_MAX_RETRIES: int = 3
+    PIPELINE_EXPORT_COHESION_GATE: float = 0.999
+    PIPELINE_EXPORT_MAX_DOC_COUNT: int = 5
+    OUTPUT_EXCERPT_TRUNCATION: int = 280
+    EMIT_OUTPUT_TO_STDOUT: bool = False
+
+    # --- Centrality scaling ---
+    CENTRALITY_EXACT_MAX_NODES: int = 200
+    CENTRALITY_APPROX_K: int = 50
 
     # --- API rate limits ---
     MARKETAUX_DAILY_LIMIT: int = 100
@@ -142,8 +173,12 @@ class Settings(BaseSettings):
 
     @field_validator("ANTHROPIC_API_KEY")
     @classmethod
-    def api_key_must_not_be_empty(cls, v: str) -> str:
+    def api_key_must_not_be_empty(cls, v: str, info) -> str:
+        # Allow placeholder in non-production environments to avoid blocking tests
+        env = info.data.get("ENVIRONMENT", "development")
         if not v or not v.strip():
+            if env.lower() in ("test", "development"):
+                return "placeholder-key-for-non-prod"
             raise ValueError(
                 "ANTHROPIC_API_KEY must not be empty — system cannot start. "
                 "Set it in your .env file."
@@ -178,6 +213,13 @@ class Settings(BaseSettings):
     def hdbscan_params_minimum(cls, v: int, info) -> int:
         if v < 2:
             raise ValueError(f"{info.field_name} must be >= 2, got {v}")
+        return v
+
+    @field_validator("CLUSTER_MAX_PENDING_BATCH", "PERIODIC_DEDUP_MAX_PAIRS")
+    @classmethod
+    def clustering_caps_must_be_positive(cls, v: int, info) -> int:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be a positive integer, got {v}")
         return v
 
     @field_validator("LSH_NUM_PERM")
@@ -234,8 +276,22 @@ def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
+        if _settings.CLUSTER_MAX_PENDING_BATCH < _settings.HDBSCAN_MIN_CLUSTER_SIZE:
+            raise ValueError(
+                "CLUSTER_MAX_PENDING_BATCH must be >= HDBSCAN_MIN_CLUSTER_SIZE"
+            )
         ensure_data_dirs(_settings)
     return _settings
+
+
+def get_api_settings() -> Settings:
+    """Best-effort settings for API import paths that run without Anthropic keys."""
+    try:
+        return get_settings()
+    except Exception:
+        fallback = Settings(ANTHROPIC_API_KEY="api-local-placeholder")
+        ensure_data_dirs(fallback)
+        return fallback
 
 
 def __getattr__(name: str):

@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { setApiToken } from "@/lib/api";
+import { fetchAuthMe, logoutAuthSession, setApiToken } from "@/lib/api";
 
 const STUB_TOKEN = "stub-auth-token";
 const STORAGE_KEY = "auth_token";
@@ -26,11 +26,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // H7: Check auth via /api/auth/me on mount (cookie-based)
   useEffect(() => {
-    fetch("/api/auth/me", { credentials: "include" })
-      .then((res) => {
-        if (res.ok) return res.json();
-        return null;
-      })
+    fetchAuthMe()
       .then((data) => {
         if (data) {
           // Server confirms we are authenticated — set a marker token
@@ -77,9 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // ignore
     }
     // H7: Call logout endpoint to clear HttpOnly cookie
-    fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(
-      () => {}
-    );
+    logoutAuthSession().catch(() => {});
     setToken(null);
   }, []);
 
